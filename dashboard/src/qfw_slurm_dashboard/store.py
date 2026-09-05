@@ -67,7 +67,9 @@ class DashboardStore:
                 stream.write(redact(json.dumps(payload, sort_keys=True)) + "\n")
             os.chmod(path, 0o600)
 
-    def events(self, *, cursor: int = 0, limit: int = 500) -> dict[str, Any]:
+    def events(
+        self, *, cursor: int = 0, limit: int = 500, identity: str = "root"
+    ) -> dict[str, Any]:
         path = self.root / "events.jsonl"
         if not path.exists():
             return {"events": [], "cursor": 0, "gap": False}
@@ -80,9 +82,12 @@ class DashboardStore:
         events = []
         for line in selected:
             try:
-                events.append(json.loads(line))
+                event = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            event_identity = str(event.get("identity", ""))
+            if identity == "root" or not event_identity or event_identity == identity:
+                events.append(event)
         return {"events": events, "cursor": start + len(selected), "gap": gap}
 
     def audit(self, event: dict[str, Any]) -> None:

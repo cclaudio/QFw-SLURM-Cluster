@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any
 
 SCHEMA_VERSION = "qfw-dashboard-v1"
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,7 @@ class Experiment:
     completed_at: str = ""
     result: dict[str, Any] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)
+    manifest: dict[str, Any] = field(default_factory=dict)
 
     def payload(self) -> dict[str, Any]:
         return {"schema": SCHEMA_VERSION, **asdict(self)}

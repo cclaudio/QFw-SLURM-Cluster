@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 
 _SECRET_PATTERNS = (
-    re.compile(r"(?i)(api[_-]?key|refresh[_-]?token|authorization)(\s*[:=]\s*)\S+"),
+    re.compile(
+        r"(?i)(api[_-]?key|refresh[_-]?token|authorization)"
+        r"(\s*[:=]\s*)(?:bearer\s+)?\S+"
+    ),
     re.compile(r"(?i)(bearer)\s+[A-Za-z0-9._~+/=-]+"),
 )
 

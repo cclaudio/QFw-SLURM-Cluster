@@ -35,6 +35,7 @@ def parser() -> argparse.ArgumentParser:
     events = commands.add_parser("events")
     events.add_argument("--cursor", type=int, default=0)
     events.add_argument("--limit", type=int, default=500)
+    events.add_argument("--identity", choices=IDENTITIES, default="user-a")
     action = commands.add_parser("action")
     action.add_argument("action")
     action.add_argument("--identity", choices=IDENTITIES, default="user-a")
@@ -51,7 +52,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "diagnostics":
         payload = service.diagnostic_state()
     elif args.command == "events":
-        payload = service.events(args.cursor, args.limit)
+        payload = service.events(args.cursor, args.limit, args.identity)
     else:
         payload = service.submit_action(
             args.action, args.identity, args.target, args.request_id
