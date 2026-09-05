@@ -1,0 +1,14 @@
+.TH QFW-DASHBOARD-DISABLE 8 "September 2026" "QFw 0.1" "Administration"
+.SH NAME
+qfw-dashboard-disable \- stop or purge the optional cluster dashboard
+.SH SYNOPSIS
+.B qfw-dashboard-disable
+.RI [ --purge ]
+.SH DESCRIPTION
+Stops the dashboard service while preserving its virtual environment and
+state. With --purge, removes only generated dashboard installation, runtime,
+and state directories beneath dashboard. Cluster and QFw service state are
+never changed.
+.SH SEE ALSO
+.BR qfw-dashboard-enable (8),
+.BR qfw-dashboard-service (8)

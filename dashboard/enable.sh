@@ -94,6 +94,12 @@ env -u PYTHONPATH "${venv_dir}/bin/python" -m pip install \
 
 mkdir -p "${state_root}/.electroboy/service" "${dashboard_dir}/run"
 chmod 700 "${state_root}" "${dashboard_dir}/run"
+ln -sfn "${dashboard_dir}/enable.sh" \
+    "${venv_dir}/bin/qfw-dashboard-enable"
+ln -sfn "${dashboard_dir}/disable.sh" \
+    "${venv_dir}/bin/qfw-dashboard-disable"
+ln -sfn "${dashboard_dir}/service.sh" \
+    "${venv_dir}/bin/qfw-dashboard-service"
 python3 - "${state_root}/.electroboy/service/workflows.json" <<'PY'
 import json
 import pathlib

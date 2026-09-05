@@ -1,0 +1,33 @@
+.TH QFW-DASHBOARD 1 "September 2026" "QFw 0.1" "User Commands"
+.SH NAME
+qfw-dashboard \- inspect and operate dashboard capabilities from a terminal
+.SH SYNOPSIS
+.B qfw-dashboard
+.RI [ options ]
+.BR status | diagnostics | events
+.br
+.B qfw-dashboard
+.RI [ options ]
+.B action
+.I action
+.RI [ action-options ]
+.SH DESCRIPTION
+Calls the same typed capabilities used by the QFw Slurm cluster dashboard.
+Output is JSON for CI and diagnostics. This command does not render or require
+a browser.
+.SH OPTIONS
+.TP
+.BI --cluster-root " path"
+Select the QFw-SLURM-Cluster checkout.
+.TP
+.BI --state-root " path"
+Select retained dashboard operation and event state.
+.TP
+.BI --identity " name"
+Run an action as root, user-a, user-b, or user-c.
+.TP
+.BI --request-id " id"
+Supply an idempotency identifier for an action.
+.SH SEE ALSO
+.BR qfw-dashboard-enable (8),
+.BR qfw-dashboard-service (8)
