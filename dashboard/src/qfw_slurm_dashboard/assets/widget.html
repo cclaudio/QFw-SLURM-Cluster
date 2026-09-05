@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QFw dashboard widget</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { background: #111827; color: #e5e7eb; margin: 0; padding: 1rem; }
+    header { align-items: center; display: flex; flex-wrap: wrap; gap: 1rem; }
+    h1 { font-size: 1.2rem; margin: 0; }
+    .context { font-size: 0.8rem; opacity: 0.8; }
+    .disconnected { color: #f87171; }
+    input { margin: 1rem 0; width: min(30rem, 90vw); }
+    pre { overflow: auto; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1 id="label">QFw widget</h1>
+    <span id="context" class="context">waiting for dashboard</span>
+  </header>
+  <label>Filter <input id="filter" type="search"></label>
+  <pre id="output">Waiting for the dashboard data source…</pre>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const widget = params.get("widget") || "unknown";
+    const instanceId = params.get("instance_id") || widget;
+    const contextId = params.get("context_id") || "detached";
+    const channel = new BroadcastChannel(`qfw-dashboard-widget-v1:${contextId}`);
+    const label = document.getElementById("label");
+    const context = document.getElementById("context");
+    const output = document.getElementById("output");
+    const filter = document.getElementById("filter");
+    let lastPayload = null;
+    let lastUpdate = 0;
+
+    function render() {
+      const query = filter.value.toLowerCase();
+      const formatted = JSON.stringify(lastPayload, null, 2);
+      output.textContent = !query
+        ? formatted
+        : formatted.split("\n").filter((line) => line.toLowerCase().includes(query)).join("\n");
+    }
+
+    filter.addEventListener("input", () => {
+      render();
+      channel.postMessage({
+        type: "presentation",
+        widget,
+        instance_id: instanceId,
+        presentation: { filter: filter.value },
+      });
+    });
+    channel.addEventListener("message", (event) => {
+      const message = event.data || {};
+      if (message.type !== "state" || message.instance_id !== instanceId) return;
+      label.textContent = message.label;
+      context.classList.remove("disconnected");
+      context.textContent = `${message.cluster} · ${message.identity} · ${message.freshness}`;
+      if (message.presentation?.filter !== undefined && document.activeElement !== filter) {
+        filter.value = message.presentation.filter;
+      }
+      lastPayload = message.payload;
+      lastUpdate = Date.now();
+      render();
+    });
+    window.setInterval(() => {
+      if (lastUpdate && Date.now() - lastUpdate < 8000) return;
+      context.classList.add("disconnected");
+      context.textContent = "Dashboard disconnected; attempting to reconnect";
+      channel.postMessage({ type: "request", widget, instance_id: instanceId });
+    }, 2500);
+    channel.postMessage({ type: "request", widget, instance_id: instanceId });
+    window.addEventListener("pagehide", () => channel.close(), { once: true });
+  </script>
+</body>
+</html>

@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 from http import HTTPStatus
+from importlib import resources
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from electroboy.service.http import JsonResponse, ServiceResponse
+from electroboy.service.http import HtmlResponse, JsonResponse, ServiceResponse
 from electroboy.service.registry import RouteDefinition
 from electroboy.service.routes import RouteRequest
 
 from .service import DashboardService
+from .runner import IDENTITIES
 
 _SERVICES: dict[tuple[Path, Path], DashboardService] = {}
 _SERVICES_LOCK = Lock()
@@ -63,9 +65,17 @@ def _events(request: RouteRequest) -> JsonResponse:
     try:
         cursor = int((request.params.get("cursor") or ["0"])[0])
         limit = int((request.params.get("limit") or ["500"])[0])
-        return JsonResponse(_service(request).events(cursor, limit))
+        identity = str((request.params.get("identity") or [""])[0])
+        return JsonResponse(_service(request).events(cursor, limit, identity))
     except Exception as error:
         return _error(error)
+
+
+def _widget(request: RouteRequest) -> HtmlResponse:
+    body = resources.files("qfw_slurm_dashboard").joinpath(
+        "assets/widget.html"
+    ).read_text(encoding="utf-8")
+    return HtmlResponse(body)
 
 
 def _operation(request: RouteRequest) -> JsonResponse:
@@ -76,6 +86,7 @@ def _operation(request: RouteRequest) -> JsonResponse:
             str(body.get("identity", "")),
             str(body.get("target", "cluster")),
             str(body.get("request_id", "")),
+            str(body.get("reason", "qfw-dashboard")),
         )
         return JsonResponse(operation.payload(), status=HTTPStatus.ACCEPTED)
     except Exception as error:
@@ -108,22 +119,60 @@ def _cancel(request: RouteRequest) -> JsonResponse:
         return _error(error)
 
 
+def _shell(request: RouteRequest) -> JsonResponse:
+    try:
+        body = request.body()
+        identity = str(body.get("identity", ""))
+        if identity not in IDENTITIES:
+            raise ValueError("unsupported identity")
+        home = "/root" if identity == "root" else f"/workspace/home/{identity}"
+        session, _ = request.services.sessions.start_project_shell(
+            request.context_id
+        )
+        command = (
+            f"exec docker exec -it --user {identity} --workdir {home} "
+            f"--env HOME={home} --env USER={identity} --env LOGNAME={identity} "
+            "slurmctld /bin/bash -l\r"
+        )
+        request.services.sessions.send_project_shell_input(
+            request.context_id, command, session.session_id
+        )
+        _service(request).store.audit({
+            "identity": identity,
+            "action": "shell-start",
+            "target": "slurmctld",
+            "request_id": session.session_id,
+            "outcome": "started",
+        })
+        return JsonResponse({
+            "status": "started",
+            "identity": identity,
+            "shell_session": session.payload(selected=False),
+        }, status=HTTPStatus.ACCEPTED)
+    except Exception as error:
+        return _error(error)
+
+
 ROUTES = (
     route("GET", "/api/qfw-dashboard/state", "state", lease=False),
     route("GET", "/api/qfw-dashboard/diagnostics", "diagnostics", lease=False),
     route("GET", "/api/qfw-dashboard/events", "events", lease=False),
+    route("GET", "/qfw-dashboard/widget", "widget", lease=False),
     route("POST", "/api/qfw-dashboard/operations", "operation"),
     route("POST", "/api/qfw-dashboard/preview", "preview"),
     route("POST", "/api/qfw-dashboard/experiments", "experiment"),
     route("POST", "/api/qfw-dashboard/experiments/cancel", "cancel"),
+    route("POST", "/api/qfw-dashboard/shell", "shell"),
 )
 
 HANDLERS: dict[str, Any] = {
     "state": _state,
     "diagnostics": _diagnostics,
     "events": _events,
+    "widget": _widget,
     "operation": _operation,
     "preview": _preview,
     "experiment": _experiment,
     "cancel": _cancel,
+    "shell": _shell,
 }

@@ -1,3 +1,123 @@
-.qfw-slurm-cluster-workflow .project-status-output {
-  white-space: normal;
+.qfw-slurm-cluster-workflow .project-status-pane { min-width: 0; }
+
+.qfw-dashboard {
+  background: var(--panel, #111827);
+  color: var(--text, #e5e7eb);
+  height: 100%;
+  overflow: auto;
+  padding: 1rem;
+}
+
+.qfw-dashboard-header,
+.qfw-inline-controls,
+.qfw-actions,
+.qfw-experiment-form,
+.qfw-progress-tools {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.qfw-dashboard-header {
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.qfw-dashboard-header h2,
+.qfw-actions h3,
+.qfw-experiment-form h3 { margin: 0; }
+
+.qfw-widget-grid {
+  display: grid;
+  gap: 0.8rem;
+  grid-template-columns: repeat(auto-fit, minmax(22rem, 1fr));
+  margin: 1rem 0;
+}
+
+.qfw-widget {
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  border-radius: 0.5rem;
+  min-width: 0;
+  padding: 0.6rem;
+}
+
+.qfw-widget summary {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  font-weight: 700;
+  justify-content: space-between;
+}
+
+.qfw-popout { margin-left: auto; }
+.qfw-health { display: grid; gap: 0.5rem; }
+.qfw-state { text-transform: uppercase; }
+.qfw-ready { color: #34d399; }
+.qfw-partial, .qfw-degraded { color: #fbbf24; }
+.qfw-stopped, .qfw-unavailable { color: #f87171; }
+.qfw-freshness { font-size: 0.8rem; opacity: 0.75; }
+.qfw-table-wrap { max-height: 22rem; overflow: auto; }
+
+.qfw-table {
+  border-collapse: collapse;
+  font-size: 0.78rem;
+  margin-top: 0.5rem;
+  width: 100%;
+}
+
+.qfw-table th,
+.qfw-table td {
+  border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  padding: 0.35rem;
+  text-align: left;
+}
+
+.qfw-empty { opacity: 0.7; text-align: center !important; }
+
+.qfw-actions,
+.qfw-experiment-form {
+  border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.qfw-actions button.danger { border-color: #ef4444; }
+.qfw-command-preview { flex-basis: 100%; overflow-wrap: anywhere; }
+
+.qfw-topology {
+  max-width: 100%;
+  overflow: auto;
+}
+
+.qfw-topology-graph {
+  min-height: 18rem;
+}
+
+.qfw-topology-graph rect {
+  fill: #1f2937;
+  stroke: #60a5fa;
+}
+
+.qfw-topology-edge {
+  stroke: #6b7280;
+  stroke-width: 2;
+}
+
+.qfw-topology-graph text {
+  fill: #e5e7eb;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.qfw-progress-tools {
+  font-size: 0.75rem;
+  margin-left: auto;
+}
+
+@media (max-width: 720px) {
+  .qfw-widget-grid { grid-template-columns: 1fr; }
 }
