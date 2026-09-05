@@ -1,0 +1,129 @@
+"""Transport-neutral HTTP routes for dashboard capabilities."""
+
+from __future__ import annotations
+
+from http import HTTPStatus
+from pathlib import Path
+from threading import Lock
+from typing import Any
+
+from electroboy.service.http import JsonResponse, ServiceResponse
+from electroboy.service.registry import RouteDefinition
+from electroboy.service.routes import RouteRequest
+
+from .service import DashboardService
+
+_SERVICES: dict[tuple[Path, Path], DashboardService] = {}
+_SERVICES_LOCK = Lock()
+
+
+def route(
+    method: str, path: str, handler_name: str, *, lease: bool = True
+) -> RouteDefinition:
+    return RouteDefinition(
+        method,
+        path,
+        "qfw-slurm-cluster",
+        handler_name,
+        requires_workspace_lease=lease,
+    )
+
+
+def _service(request: RouteRequest) -> DashboardService:
+    cluster_root = Path(request.config.root).resolve()
+    state_root = Path(request.config.state_root).resolve()
+    key = (cluster_root, state_root)
+    with _SERVICES_LOCK:
+        if key not in _SERVICES:
+            _SERVICES[key] = DashboardService(cluster_root, state_root)
+        return _SERVICES[key]
+
+
+def _error(error: Exception) -> JsonResponse:
+    if isinstance(error, PermissionError):
+        status = HTTPStatus.FORBIDDEN
+    elif isinstance(error, KeyError):
+        status = HTTPStatus.NOT_FOUND
+    elif isinstance(error, (TypeError, ValueError)):
+        status = HTTPStatus.BAD_REQUEST
+    else:
+        status = HTTPStatus.CONFLICT
+    return JsonResponse({"error": str(error)}, status=status)
+
+
+def _state(request: RouteRequest) -> JsonResponse:
+    return JsonResponse(_service(request).state())
+
+
+def _diagnostics(request: RouteRequest) -> JsonResponse:
+    return JsonResponse(_service(request).diagnostic_state())
+
+
+def _events(request: RouteRequest) -> JsonResponse:
+    try:
+        cursor = int((request.params.get("cursor") or ["0"])[0])
+        limit = int((request.params.get("limit") or ["500"])[0])
+        return JsonResponse(_service(request).events(cursor, limit))
+    except Exception as error:
+        return _error(error)
+
+
+def _operation(request: RouteRequest) -> JsonResponse:
+    try:
+        body = request.body()
+        operation = _service(request).submit_action(
+            str(body.get("action", "")),
+            str(body.get("identity", "")),
+            str(body.get("target", "cluster")),
+            str(body.get("request_id", "")),
+        )
+        return JsonResponse(operation.payload(), status=HTTPStatus.ACCEPTED)
+    except Exception as error:
+        return _error(error)
+
+
+def _preview(request: RouteRequest) -> JsonResponse:
+    try:
+        return JsonResponse({"command": _service(request).command_preview(request.body())})
+    except Exception as error:
+        return _error(error)
+
+
+def _experiment(request: RouteRequest) -> JsonResponse:
+    try:
+        experiment = _service(request).submit_experiment(request.body())
+        return JsonResponse(experiment.payload(), status=HTTPStatus.ACCEPTED)
+    except Exception as error:
+        return _error(error)
+
+
+def _cancel(request: RouteRequest) -> JsonResponse:
+    try:
+        body = request.body()
+        _service(request).cancel_experiment(
+            str(body.get("experiment_id", "")), str(body.get("identity", ""))
+        )
+        return JsonResponse({"status": "cancel-requested"})
+    except Exception as error:
+        return _error(error)
+
+
+ROUTES = (
+    route("GET", "/api/qfw-dashboard/state", "state", lease=False),
+    route("GET", "/api/qfw-dashboard/diagnostics", "diagnostics", lease=False),
+    route("GET", "/api/qfw-dashboard/events", "events", lease=False),
+    route("POST", "/api/qfw-dashboard/operations", "operation"),
+    route("POST", "/api/qfw-dashboard/preview", "preview"),
+    route("POST", "/api/qfw-dashboard/experiments", "experiment"),
+    route("POST", "/api/qfw-dashboard/experiments/cancel", "cancel"),
+)
+
+HANDLERS: dict[str, Any] = {
+    "state": _state,
+    "diagnostics": _diagnostics,
+    "events": _events,
+    "operation": _operation,
+    "preview": _preview,
+    "experiment": _experiment,
+    "cancel": _cancel,
+}

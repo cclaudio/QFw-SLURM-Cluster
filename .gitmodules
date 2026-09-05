@@ -1,0 +1,3 @@
+[submodule "dashboard/external/electroboy"]
+	path = dashboard/external/electroboy
+	url = https://github.com/openQSE/electroboy.git
