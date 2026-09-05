@@ -92,7 +92,10 @@ def _qfw_json(runner: CommandRunner, name: str, argv: tuple[str, ...]) -> Source
     result = runner.cluster("root", argv)
     if result.returncode:
         message = result.stderr or result.stdout
-        status = "stopped" if "not running" in message.lower() else "unavailable"
+        stopped_markers = ("not running", "not ready", "state not found")
+        status = "stopped" if any(
+            marker in message.lower() for marker in stopped_markers
+        ) else "unavailable"
         return SourceState(name, status, utc_now(), error=message[:1000])
     try:
         records = _json_objects(result.stdout)
@@ -102,11 +105,54 @@ def _qfw_json(runner: CommandRunner, name: str, argv: tuple[str, ...]) -> Source
 
 
 def service_status(runner: CommandRunner) -> SourceState:
-    return _qfw_json(runner, "services", ("qfw-sinfo", "--json"))
+    return _qfw_json(runner, "services", (
+        "bash", "-lc",
+        "export QFW_SHARED_ROOT=/workspace/qfw-container-base; "
+        "source /opt/openqse/qfw/bin/qfw-activate "
+        "--venv /opt/openqse/qfw-venv >/dev/null && qfw-sinfo --json",
+    ))
 
 
 def allocation_status(runner: CommandRunner) -> SourceState:
-    return _qfw_json(runner, "allocations", ("qfw-squeue", "--json"))
+    return _qfw_json(runner, "allocations", (
+        "bash", "-lc",
+        "export QFW_SHARED_ROOT=/workspace/qfw-container-base; "
+        "source /opt/openqse/qfw/bin/qfw-activate "
+        "--venv /opt/openqse/qfw-venv >/dev/null && qfw-squeue --json",
+    ))
+
+
+def service_plane_status(runner: CommandRunner) -> SourceState:
+    result = runner.cluster("root", ("qfw-site-services", "status"), timeout=60)
+    output = f"{result.stdout}\n{result.stderr}"
+    headings = (
+        ("directory", "Directory service"),
+        ("nwqsim", "NWQSim QPM"),
+        ("iqm", "IQM QPM"),
+        ("gateway", "QFw Slurm gateway"),
+    )
+    records: list[dict[str, Any]] = []
+    lines = output.splitlines()
+    for component, heading in headings:
+        index = next(
+            (position for position, line in enumerate(lines) if line.startswith(heading)),
+            -1,
+        )
+        detail = ""
+        if index >= 0:
+            detail = " ".join(lines[index + 1 : index + 3])
+        failed = not detail or any(
+            marker in detail.lower()
+            for marker in ("not found", "not-ready", "traceback", "refused", "failed")
+        )
+        records.append({
+            "component": component,
+            "state": "stopped" if failed else "ready",
+            "detail": detail[-1000:],
+        })
+    ready = sum(item["state"] == "ready" for item in records)
+    status = "ready" if ready == len(records) else "degraded" if ready else "stopped"
+    return SourceState("service-plane", status, utc_now(), records)
 
 
 def diagnostics(runner: CommandRunner) -> SourceState:
@@ -116,6 +162,18 @@ def diagnostics(runner: CommandRunner) -> SourceState:
         ("cpu", ("nproc",)),
         ("mounts", ("findmnt", "--json", "/workspace")),
         ("modules", ("bash", "-lc", "module -t avail 2>&1")),
+        (
+            "gateway-connectivity",
+            ("bash", "-lc", "timeout 2 bash -c '</dev/tcp/slurmctld/18095'"),
+        ),
+        (
+            "credential-readiness",
+            (
+                "bash", "-lc",
+                "test -r /etc/openqse/qfw/qpu-users.json "
+                "-o -r /etc/qfw/qpu-users.json",
+            ),
+        ),
     )
     records: list[dict[str, Any]] = []
     for name, argv in checks:
@@ -136,6 +194,7 @@ COLLECTORS: tuple[Callable[[CommandRunner], SourceState], ...] = (
     slurm_status,
     service_status,
     allocation_status,
+    service_plane_status,
 )
 
 

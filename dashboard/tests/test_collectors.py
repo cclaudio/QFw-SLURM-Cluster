@@ -10,6 +10,8 @@ class FakeRunner:
 
     def cluster(self, identity, argv, **kwargs):
         command = argv[0]
+        if command == "bash":
+            command = "qfw-sinfo" if "qfw-sinfo" in argv[-1] else "qfw-squeue"
         if command == "sinfo":
             return CommandResult(tuple(argv), 0, "c1|normal|idle||4|1024|compute\n", "")
         if command == "squeue":
@@ -18,6 +20,8 @@ class FakeRunner:
             return CommandResult(tuple(argv), 1, "", "not running")
         if command == "qfw-squeue":
             return CommandResult(tuple(argv), 0, "[]\n", "")
+        if command == "qfw-site-services":
+            return CommandResult(tuple(argv), 1, "Directory service\nstate not found\n", "")
         raise AssertionError(command)
 
 
@@ -27,6 +31,7 @@ def test_collectors_keep_partial_state_when_service_is_stopped() -> None:
     assert sources["slurm"].records[0]["node"] == "c1"
     assert sources["services"].status == "stopped"
     assert sources["allocations"].status == "ready"
+    assert sources["service-plane"].status == "stopped"
 
 
 def test_malformed_docker_output_is_typed_unavailable() -> None:
