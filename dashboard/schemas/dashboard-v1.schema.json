@@ -21,6 +21,22 @@
     "experiments": {
       "type": "array",
       "items": {"$ref": "#/$defs/experiment"}
+    },
+    "examples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "script", "backends", "hardware_risk"],
+        "properties": {
+          "name": {"type": "string"},
+          "script": {"type": "string"},
+          "backends": {
+            "type": "array",
+            "items": {"enum": ["nwqsim", "iqm"]}
+          },
+          "hardware_risk": {"type": "boolean"}
+        }
+      }
     }
   },
   "$defs": {
@@ -115,8 +131,28 @@
         "job_id": {"type": "string"},
         "service_id": {"type": "string"},
         "reservation_id": {"type": "string"},
+        "experiment_id": {"type": "string"},
+        "operation_id": {"type": "string"},
+        "source_position": {"type": ["string", "integer"]},
         "severity": {"enum": ["debug", "info", "warning", "error", "critical"]},
         "message": {"type": "string"}
+      }
+    },
+    "log_page": {
+      "type": "object",
+      "required": ["schema", "source", "events", "cursor", "gap", "status"],
+      "properties": {
+        "schema": {"const": "qfw-dashboard-log-page-v1"},
+        "source": {"type": "string"},
+        "instance": {"type": "string"},
+        "events": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/progress_event"}
+        },
+        "cursor": {"type": "integer", "minimum": 0},
+        "gap": {"type": "boolean"},
+        "status": {"enum": ["ready", "unavailable"]},
+        "error": {"type": "string"}
       }
     }
   }

@@ -370,7 +370,7 @@ shows how an experiment maps onto Slurm and QFw resources.
 | DASH-217 | After selecting a component, the context tool menu shall offer available component instances, nodes, jobs, services, and reservations. |
 | DASH-218 | Within the selected component context, the menu shall filter by debug, informational, warning, error, and critical severity when supplied by the source. |
 | DASH-219 | The Progress pane shall also support time-range filtering, text search, pause, resume, and live follow. |
-| DASH-220 | More than one Progress pane may be open, and each shall retain independent context and filter state. |
+| DASH-220 | The Progress pane shall retain its captured identity and filter state independently of the active Dashboard identity. |
 | DASH-221 | A Progress pane shall display the active filters, selected identity, stream status, and observation freshness. |
 | DASH-222 | Changing the global identity selector shall not retarget an existing Progress pane created under another captured identity. |
 
@@ -823,15 +823,15 @@ Completion gate:
 - [ ] Add time range, text search, pause, resume, and live-follow controls.
 - [ ] Display active filters, selected identity, connection state, and
   freshness.
-- [ ] Support several Progress panes with independent captured identities and
-  filter state.
+- [ ] Keep Progress filters and the captured identity independent of the
+  active Dashboard identity.
 - [ ] Add backpressure, bounded buffering, reconnect cursors, and gap
   indicators.
 
 Completion gate:
 
-- [ ] Application output and QPMd errors can be followed in separate Progress
-  panes during one experiment.
+- [ ] Application output and QPMd errors can be selected independently in the
+  Progress pane during one experiment.
 - [ ] Component and severity filters produce the expected subset.
 - [ ] A high-volume source cannot exhaust the backend or browser.
 - [ ] No known secret reaches persisted or streamed output.

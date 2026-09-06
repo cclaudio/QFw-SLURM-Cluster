@@ -34,3 +34,21 @@ environment, runtime files, and saved dashboard state should be removed. This
 does not stop, rebuild, or alter the Slurm cluster or QFw services.
 
 Run `man qfw-dashboard-disable` for the exact cleanup boundary.
+
+Cluster and QFw recovery remains available after the browser service recovers.
+Select `root` in Dashboard to drain or resume a node, restart an individual
+QPM, or restart the complete service plane. Stop both QPMs before attempting to
+stop or restart the directory service. The dashboard rejects an unsafe
+directory action and names the active dependency.
+
+Inspect the retained evidence after a failed action:
+
+```bash
+qfw-dashboard events --identity root
+qfw-dashboard status
+qfw-dashboard diagnostics
+```
+
+The operation record retains the command exit code and bounded, redacted
+output. Use the existing cluster service recipes for manual recovery when the
+manager reports a component-specific failure.

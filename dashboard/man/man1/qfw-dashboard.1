@@ -15,6 +15,17 @@ qfw-dashboard \- inspect and operate dashboard capabilities from a terminal
 Calls the same typed capabilities used by the QFw Slurm cluster dashboard.
 Output is JSON for CI and diagnostics. This command does not render or require
 a browser.
+.PP
+The status record contains Docker, Slurm, QFw service, allocation,
+service-plane, version, image, and configuration-fingerprint sources. The
+diagnostics record checks MUNGE, clocks, CPU topology, mounts, modules,
+directory publication, registration, DVM state, gateway connectivity, and
+credential readiness without returning credential data.
+.PP
+The action command accepts the allow-listed cluster lifecycle, service
+lifecycle, gateway recovery, node-drain, and node-resume actions exposed by the
+dashboard. Host and service mutations require
+.BR "--identity root" .
 .SH OPTIONS
 .TP
 .BI --cluster-root " path"

@@ -23,6 +23,25 @@ Split the workspace to place Progress, File, or Shell beside Dashboard. Use
 Progress filters in component-first order. File browses this checkout through
 ElectroBoy's Markdown capability. **Open selected cluster shell** starts the
 Shell pane in `slurmctld` as the identity selected when the shell was created.
+Regular users may also select a compute node allocated to one of their running
+jobs. Service-node shells require `root` and a second confirmation.
+
+The experiment form discovers the installed QFw examples. Select normal or
+heterogeneous placement, then provide the Slurm partition, node and task counts,
+optional account or QoS, and the quantum request bounds. **Preview
+allocation** shows the exact `sbatch` request. The submitted batch job activates
+QFw, runs the example against the persistent site QPM, and deactivates QFw
+before Slurm and qfw-slurm release the allocation.
+
+Use the Progress pane's Logs mode to follow application output or an operational
+source. Component, context, severity, time, and text filters apply locally.
+Operational service logs require `root`; application output remains bound to
+the identity that submitted the experiment.
+
+Completed experiments can be retried without modifying the original record.
+The Result summary can compare two runs with the same backend and example.
+Missing QFw terminal records remain failures even when Slurm reports a zero
+exit status.
 
 Real IQM submissions require a separate confirmation and bounded shot count.
 Credentials never appear in dashboard forms, retained events, or results.
