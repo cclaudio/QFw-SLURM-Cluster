@@ -28,4 +28,4 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     ):
         assert f'["{widget}",' in frontend
     assert "BroadcastChannel" in frontend
-    assert "setInterval(refreshState, 2500)" in frontend
+    assert "setTimeout(pollState, 2500)" in frontend

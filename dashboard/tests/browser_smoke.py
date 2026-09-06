@@ -78,11 +78,19 @@ def main() -> int:
             ">Scratch</option>",
         )
         present = [value for value in forbidden if value in html]
-        if missing or present:
+        widgets = tuple(
+            f'data-widget="{name}"' for name in (
+                "health", "nodes", "services", "allocations", "experiments",
+                "topology", "results", "alerts",
+            )
+        )
+        missing_widgets = [value for value in widgets if value not in html]
+        if missing or present or missing_widgets:
             print(f"missing: {missing}")
             print(f"unexpected: {present}")
+            print(f"missing widgets: {missing_widgets}")
             return 1
-        print("PASS: cluster workflow and exact four-pane catalog rendered")
+        print("PASS: four-pane workflow and fixed dashboard widgets rendered")
         return 0
 
 

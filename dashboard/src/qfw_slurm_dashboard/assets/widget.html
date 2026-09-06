@@ -19,6 +19,7 @@
   <header>
     <h1 id="label">QFw widget</h1>
     <span id="context" class="context">waiting for dashboard</span>
+    <button id="collapse" type="button">Collapse</button>
   </header>
   <label>Filter <input id="filter" type="search"></label>
   <pre id="output">Waiting for the dashboard data source…</pre>
@@ -32,6 +33,7 @@
     const context = document.getElementById("context");
     const output = document.getElementById("output");
     const filter = document.getElementById("filter");
+    const collapse = document.getElementById("collapse");
     let lastPayload = null;
     let lastUpdate = 0;
 
@@ -52,6 +54,15 @@
         presentation: { filter: filter.value },
       });
     });
+    collapse.addEventListener("click", () => {
+      const expanded = output.hidden;
+      output.hidden = !expanded;
+      collapse.textContent = expanded ? "Collapse" : "Expand";
+      channel.postMessage({
+        type: "presentation", widget, instance_id: instanceId,
+        presentation: { expanded },
+      });
+    });
     channel.addEventListener("message", (event) => {
       const message = event.data || {};
       if (message.type !== "state" || message.instance_id !== instanceId) return;
@@ -60,6 +71,10 @@
       context.textContent = `${message.cluster} · ${message.identity} · ${message.freshness}`;
       if (message.presentation?.filter !== undefined && document.activeElement !== filter) {
         filter.value = message.presentation.filter;
+      }
+      if (message.presentation?.expanded !== undefined) {
+        output.hidden = !message.presentation.expanded;
+        collapse.textContent = message.presentation.expanded ? "Collapse" : "Expand";
       }
       lastPayload = message.payload;
       lastUpdate = Date.now();
@@ -72,6 +87,10 @@
       channel.postMessage({ type: "request", widget, instance_id: instanceId });
     }, 2500);
     channel.postMessage({ type: "request", widget, instance_id: instanceId });
+    window.addEventListener("focus", () => channel.postMessage({
+      type: "presentation", widget, instance_id: instanceId,
+      presentation: { focused: "external" },
+    }));
     window.addEventListener("pagehide", () => channel.close(), { once: true });
   </script>
 </body>

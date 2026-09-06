@@ -19,6 +19,7 @@
   let polling = null;
   let eventPolling = null;
   let eventCursor = 0;
+  const logCursors = {};
   let progressEvents = [];
   let progressIdentity = "user-a";
   let progressPaused = false;
@@ -68,7 +69,8 @@
     });
     const payload = await response.json().catch(() => ({ error: "invalid response" }));
     if (!response.ok) {
-      throw new Error(payload.error || `${response.status} ${response.statusText}`);
+      throw new Error(payload.error?.message || payload.error
+        || `${response.status} ${response.statusText}`);
     }
     return payload;
   }
@@ -91,21 +93,37 @@
     const value = element("table", "qfw-table");
     const head = element("thead");
     const header = element("tr");
-    columns.forEach(([, label]) => header.append(element("th", "", label)));
+    let sortedRecords = [...records];
+    columns.forEach(([key, label]) => {
+      const heading = element("th");
+      const sort = element("button", "qfw-table-sort", label);
+      sort.type = "button";
+      sort.addEventListener("click", () => {
+        sortedRecords.sort((left, right) => String(left[key] ?? "")
+          .localeCompare(String(right[key] ?? ""), undefined, { numeric: true }));
+        renderRows();
+      });
+      heading.append(sort);
+      header.append(heading);
+    });
     head.append(header);
     const body = element("tbody");
-    records.forEach((record) => {
-      const row = element("tr");
-      columns.forEach(([key]) => row.append(element("td", "", record[key] ?? "—")));
-      body.append(row);
-    });
-    if (!records.length) {
-      const row = element("tr");
-      const cell = element("td", "qfw-empty", "No records");
-      cell.colSpan = columns.length;
-      row.append(cell);
-      body.append(row);
+    function renderRows() {
+      body.replaceChildren();
+      sortedRecords.forEach((record) => {
+        const row = element("tr");
+        columns.forEach(([key]) => row.append(element("td", "", record[key] ?? "—")));
+        body.append(row);
+      });
+      if (!sortedRecords.length) {
+        const row = element("tr");
+        const cell = element("td", "qfw-empty", "No records");
+        cell.colSpan = columns.length;
+        row.append(cell);
+        body.append(row);
+      }
     }
+    renderRows();
     value.append(head, body);
     wrapper.append(value);
     return wrapper;
@@ -115,11 +133,13 @@
     const docker = selectedSource("docker");
     const slurm = selectedSource("slurm");
     const services = selectedSource("services");
+    const servicePlane = selectedSource("service-plane");
     const allocations = selectedSource("allocations");
     if (id === "health") {
       return {
         health: state.health,
         observed_at: state.observed_at,
+        inventory: selectedSource("inventory").records,
         sources: Object.values(state.sources || {}).map((source) => ({
           name: source.name,
           status: source.status,
@@ -153,7 +173,12 @@
       return {
         containers: docker.records,
         nodes: slurm.records.filter((item) => item.kind === "node"),
+        allocations: [
+          ...slurm.records.filter((item) => item.kind === "job"),
+          ...allocations.records,
+        ],
         services: services.records,
+        service_plane: servicePlane.records,
         experiments: state.experiments || [],
       };
     }
@@ -166,6 +191,11 @@
     root.append(element("span", "qfw-freshness", payload.observed_at || "not observed"));
     root.append(table(payload.sources || [], [
       ["name", "Source"], ["status", "State"], ["observed_at", "Observed"],
+    ]));
+    root.append(element("h4", "", "Version and configuration inventory"));
+    root.append(table(payload.inventory || [], [
+      ["kind", "Kind"], ["component", "Component"],
+      ["value", "Version, revision, or fingerprint"], ["path", "Path"],
     ]));
     return root;
   }
@@ -216,18 +246,60 @@
             state: item.state || item.status,
             parent: item.node || "slurmctld",
           })),
-        ]
-      : (payload.experiments || []).flatMap((item) => [
-          { type: "experiment", id: item.experiment_id, state: item.status },
-          {
-            type: "job", id: item.slurm_job_id, state: item.status,
-            parent: item.experiment_id,
-          },
-          ...(item.reservations || []).map((entry) => ({
-            type: "reservation", id: entry.join(":"), state: item.status,
-            parent: item.slurm_job_id,
+          ...(payload.service_plane || []).map((item) => ({
+            type: item.component === "dvm" ? "dvm" : item.component,
+            id: item.component,
+            state: item.state,
+            parent: item.component === "dvm" ? "nwqsim" : "slurmctld",
           })),
-        ]).filter((item) => item.id);
+        ]
+      : (payload.experiments || []).flatMap((item) => {
+          const jobs = (payload.allocations || []).filter((job) =>
+            String(job.job_id || "").split("+")[0] === String(item.slurm_job_id));
+          const records = item.result?.records || [];
+          const slurmRecords = item.result?.slurm_records || [];
+          const providerJobs = records.flatMap((record) => {
+            const identifier = record.provider_job_id || record.iqm_job_id
+              || record.details?.provider_job_id;
+            return identifier ? [{
+              type: "provider-job", id: String(identifier), state: record.status,
+              parent: item.slurm_job_id,
+            }] : [];
+          });
+          return [
+            { type: "experiment", id: item.experiment_id, state: item.status },
+            {
+              type: "job", id: item.slurm_job_id, state: item.status,
+              parent: item.experiment_id,
+            },
+            ...jobs.map((job) => ({
+              type: String(job.job_id).includes("+") ? "heterogeneous-group" : "job-state",
+              id: String(job.job_id), state: job.state, parent: item.slurm_job_id,
+            })),
+            ...jobs.filter((job) => job.nodes).map((job) => ({
+              type: "allocated-nodes", id: `${job.job_id}:${job.nodes}`,
+              state: job.state, parent: String(job.job_id),
+            })),
+            ...slurmRecords.map((record) => ({
+              type: record.kind === "step" ? "job-step" : "accounting-job",
+              id: String(record.job_id), state: record.state,
+              parent: item.slurm_job_id,
+            })),
+            ...(item.reservations || []).map((entry) => ({
+              type: "reservation", id: entry.join(":"), state: item.status,
+              parent: item.slurm_job_id,
+            })),
+            ...providerJobs,
+            ...(item.result && Object.keys(item.result).length ? [{
+              type: "result", id: `${item.experiment_id}:result`,
+              state: item.status, parent: item.experiment_id,
+            }] : []),
+            ...(item.artifacts || []).map((path, index) => ({
+              type: "artifact", id: `${item.experiment_id}:artifact:${index}`,
+              path, state: "retained", parent: `${item.experiment_id}:result`,
+            })),
+          ];
+        }).filter((item) => item.id);
     objects.sort((left, right) => `${left.type}:${left.id}`
       .localeCompare(`${right.type}:${right.id}`));
     const visibleObjects = objects.filter((item) => !filter.value
@@ -274,13 +346,34 @@
       const select = () => {
         widgetStates.topology = { ...widgetStates.topology, selected: item.id };
         savePresentation();
+        const component = runtimeApi.elements.progressOutputPane
+          .querySelector("[data-qfw-filter=component]");
         const contextFilter = runtimeApi.elements.progressOutputPane
           .querySelector("[data-qfw-filter=context]");
+        if (component) {
+          const mapping = {
+            "job": "slurm", "job-state": "slurm", "job-step": "slurm",
+            "accounting-job": "slurm", "service": "qpmd",
+            "directory": "directory", "gateway": "gateway", "dvm": "dvm",
+            "provider-job": "provider", "experiment": "application",
+            "result": "application", "artifact": "application",
+          };
+          component.value = mapping[item.type] || "";
+          component.dispatchEvent(new Event("change"));
+        }
         if (contextFilter && [...contextFilter.options]
           .some((option) => option.value === item.id)) {
           contextFilter.value = item.id;
           renderProgress();
         }
+        if (item.type === "result" || item.type === "artifact") {
+          const resultWidget = dashboardRoot.querySelector("[data-widget=results]");
+          if (resultWidget) {
+            resultWidget.open = true;
+            resultWidget.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        }
+        renderDashboard();
         publishWidgets();
       };
       group.addEventListener("click", select);
@@ -305,10 +398,21 @@
     root.append(svg, table(visibleObjects, [
       ["type", "Object"], ["id", "Identifier"], ["state", "State"],
     ]));
+    const selected = visibleObjects.find((item) =>
+      item.id === widgetStates.topology?.selected);
+    if (selected) {
+      root.append(element("h4", "", "Selected object"));
+      root.append(element("pre", "qfw-topology-selection",
+        JSON.stringify(selected, null, 2)));
+    }
     return root;
   }
 
   function renderWidgetBody(id, payload) {
+    const query = String(widgetStates[id]?.filter || "").toLowerCase();
+    if (query && Array.isArray(payload)) {
+      payload = payload.filter((item) => JSON.stringify(item).toLowerCase().includes(query));
+    }
     if (id === "health") return renderHealth(payload);
     if (id === "nodes") {
       return table(payload, [
@@ -329,11 +433,109 @@
       ]);
     }
     if (id === "experiments" || id === "results") {
-      return table(payload, [
+      const root = element("div");
+      root.append(table(payload, [
         ["experiment_id", "Experiment"], ["identity", "User"],
         ["backend", "Backend"], ["example", "Example"], ["status", "State"],
         ["slurm_job_id", "Job"],
-      ]);
+      ]));
+      const selection = [];
+      payload.forEach((experiment) => {
+        const controls = element("div", "qfw-inline-controls");
+        controls.append(element("code", "", experiment.experiment_id));
+        if (!experiment.completed_at && experiment.slurm_job_id) {
+          const cancel = element("button", "danger", "Cancel");
+          cancel.type = "button";
+          cancel.addEventListener("click", async () => {
+            if (!window.confirm(`Cancel ${experiment.experiment_id}?`)) return;
+            await request("/api/qfw-dashboard/experiments/cancel", {
+              method: "POST", body: JSON.stringify({
+                experiment_id: experiment.experiment_id, identity: activeIdentity,
+              }),
+            });
+          });
+          controls.append(cancel);
+        }
+        if (experiment.completed_at) {
+          const details = element("details", "qfw-result-details");
+          details.append(
+            element("summary", "", "Result and reproducibility manifest"),
+            element("pre", "", JSON.stringify({
+              result: experiment.result,
+              reservations: experiment.reservations,
+              artifacts: experiment.artifacts,
+              manifest: experiment.manifest,
+            }, null, 2)),
+          );
+          controls.append(details);
+          (experiment.artifacts || []).forEach((path, index) => {
+            const download = element("button", "", `Download ${path.split("/").pop()}`);
+            download.type = "button";
+            download.addEventListener("click", async () => {
+              try {
+                const payload = await request(
+                  "/api/qfw-dashboard/artifact"
+                    + `?experiment_id=${encodeURIComponent(experiment.experiment_id)}`
+                    + `&index=${index}&identity=${encodeURIComponent(activeIdentity)}`,
+                );
+                const bytes = Uint8Array.from(atob(payload.content_base64),
+                  (character) => character.charCodeAt(0));
+                const anchor = document.createElement("a");
+                anchor.href = URL.createObjectURL(new Blob([bytes]));
+                anchor.download = payload.name;
+                anchor.click();
+                URL.revokeObjectURL(anchor.href);
+              } catch (error) {
+                window.alert(error.message);
+              }
+            });
+            controls.append(download);
+          });
+          const retry = element("button", "", "Retry");
+          retry.type = "button";
+          retry.addEventListener("click", async () => {
+            const hardware = experiment.backend === "iqm";
+            if (hardware && !window.confirm("Retry bounded work on real IQM hardware?")) return;
+            await request("/api/qfw-dashboard/experiments/retry", {
+              method: "POST", body: JSON.stringify({
+                experiment_id: experiment.experiment_id,
+                identity: activeIdentity,
+                submit_real_hardware: hardware,
+              }),
+            });
+          });
+          controls.append(retry);
+          if (id === "results") {
+            const select = element("input");
+            select.type = "checkbox";
+            select.addEventListener("change", () => {
+              if (select.checked) selection.push(experiment.experiment_id);
+              else selection.splice(selection.indexOf(experiment.experiment_id), 1);
+            });
+            controls.append(element("label", "", " Compare "), select);
+          }
+        }
+        root.append(controls);
+      });
+      if (id === "results") {
+        const compare = element("button", "", "Compare selected results");
+        compare.type = "button";
+        const output = element("pre");
+        compare.addEventListener("click", async () => {
+          try {
+            const value = await request("/api/qfw-dashboard/results/compare", {
+              method: "POST", body: JSON.stringify({
+                experiment_ids: selection, identity: activeIdentity,
+              }),
+            });
+            output.textContent = JSON.stringify(value, null, 2);
+          } catch (error) {
+            window.alert(error.message);
+          }
+        });
+        root.append(compare, output);
+      }
+      return root;
     }
     if (id === "alerts") {
       return table(payload, [
@@ -373,6 +575,23 @@
     details.open = widgetStates[id]?.expanded !== false;
     const summary = element("summary");
     summary.append(element("span", "qfw-widget-title", label));
+    const filter = element("input", "qfw-widget-filter");
+    filter.type = "search";
+    filter.placeholder = "filter";
+    filter.value = widgetStates[id]?.filter || "";
+    filter.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
+    filter.addEventListener("input", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      widgetStates[id] = { ...widgetStates[id], filter: filter.value };
+      savePresentation();
+      const body = details.children[1];
+      body.replaceWith(renderWidgetBody(id, widgetPayload(id)));
+      publishWidgets();
+    });
     const pop = element("button", "qfw-popout", "Pop out");
     pop.type = "button";
     pop.addEventListener("click", (event) => {
@@ -380,7 +599,7 @@
       event.stopPropagation();
       openWidget(id, label);
     });
-    summary.append(pop);
+    summary.append(filter, pop);
     details.append(summary, renderWidgetBody(id, widgetPayload(id)));
     details.addEventListener("toggle", () => {
       widgetStates[id] = { ...widgetStates[id], expanded: details.open };
@@ -395,7 +614,16 @@
     button.type = "button";
     button.disabled = activeIdentity !== "root";
     button.addEventListener("click", async () => {
-      if (!window.confirm(`${label} as ${activeIdentity}?`)) return;
+      const revision = selectedSource("inventory").records.find((item) =>
+        item.kind === "revision" && item.component === "QFw-SLURM-Cluster")?.value
+        || "unknown";
+      const consequence = action === "cluster-recreate"
+        ? "\nThis removes and recreates cluster containers and named volumes."
+        : "";
+      if (!window.confirm(
+        `${label} as ${activeIdentity}?\nRepository: ${runtimeApi.state.activeProjectRoot}`
+          + `\nRevision: ${revision}\nTarget: cluster${consequence}`,
+      )) return;
       try {
         await request("/api/qfw-dashboard/operations", {
           method: "POST",
@@ -422,6 +650,16 @@
       actionButton("Start services", "services-start"),
       actionButton("Stop services", "services-stop", true),
       actionButton("Restart services", "services-restart", true),
+      actionButton("Start directory", "directory-start"),
+      actionButton("Stop directory", "directory-stop", true),
+      actionButton("Restart directory", "directory-restart", true),
+      actionButton("Start NWQSim", "nwqsim-start"),
+      actionButton("Stop NWQSim", "nwqsim-stop", true),
+      actionButton("Restart NWQSim", "nwqsim-restart", true),
+      actionButton("Start IQM", "iqm-start"),
+      actionButton("Stop IQM", "iqm-stop", true),
+      actionButton("Restart IQM", "iqm-restart", true),
+      actionButton("Recover gateway", "gateway-restart", true),
     );
     const node = element("input");
     node.placeholder = "node name";
@@ -451,15 +689,25 @@
     controls.append(node, reason,
       nodeAction("Drain node", "node-drain"),
       nodeAction("Resume node", "node-resume"));
+    const shellTarget = element("select");
+    ["slurmctld", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8",
+      "nwqsim-head", "nwqsim-worker-1", "nwqsim-worker-2", "iqm-head"]
+      .forEach((name) => {
+        const option = element("option", "", name);
+        option.value = name;
+        option.disabled = activeIdentity !== "root"
+          && (name.startsWith("nwqsim-") || name === "iqm-head");
+        shellTarget.append(option);
+      });
     const shell = element("button", "", "Open selected cluster shell");
     shell.type = "button";
     shell.addEventListener("click", async () => {
       if (activeIdentity === "root"
-          && !window.confirm("Open a root shell in slurmctld?")) return;
+          && !window.confirm(`Open a root shell in ${shellTarget.value}?`)) return;
       try {
         await request("/api/qfw-dashboard/shell", {
           method: "POST",
-          body: JSON.stringify({ identity: activeIdentity }),
+          body: JSON.stringify({ identity: activeIdentity, target: shellTarget.value }),
         });
         runtimeApi.layout.ensurePane("shell", "status", "column");
         window.ElectroBoyFrontend.invokeModule("project-shell", "connectProjectShellEvents");
@@ -467,7 +715,7 @@
         window.alert(error.message);
       }
     });
-    controls.append(shell);
+    controls.append(shellTarget, shell);
     root.append(controls);
   }
 
@@ -480,9 +728,16 @@
       option.value = name;
       backend.append(option);
     });
-    const example = element("input");
+    const example = element("select");
+    const discoveredExamples = state.examples?.length
+      ? state.examples : [{ name: "qiskit-simple", backends: ["nwqsim", "iqm"] }];
+    discoveredExamples.forEach((record) => {
+      const option = element("option", "", record.name);
+      option.value = record.name;
+      option.dataset.backends = (record.backends || []).join(",");
+      example.append(option);
+    });
     example.value = "qiskit-simple";
-    example.pattern = "[A-Za-z0-9_.-]+";
     const mode = element("select");
     ["normal", "heterogeneous"].forEach((name) => {
       const option = element("option", "", name);
@@ -493,6 +748,46 @@
     shots.type = "number";
     shots.min = "1";
     shots.value = "16";
+    const timeMinutes = element("input");
+    timeMinutes.type = "number";
+    timeMinutes.min = "1";
+    timeMinutes.max = "240";
+    timeMinutes.value = "45";
+    const chemistryApp = element("input");
+    chemistryApp.placeholder = "/workspace/.../chemistry.py";
+    const classical = {};
+    [
+      ["partition", "Partition", "normal", "text"],
+      ["nodes", "Application nodes", 1, "number"],
+      ["tasks", "Application tasks", 1, "number"],
+      ["launcher_nodes", "Launcher nodes", 1, "number"],
+      ["launcher_tasks", "Launcher tasks", 1, "number"],
+      ["account", "Account", "", "text"],
+      ["qos", "QoS", "", "text"],
+    ].forEach(([name, label, initial, type]) => {
+      const input = element("input");
+      input.type = type;
+      if (type === "number") input.min = "1";
+      input.value = String(initial);
+      classical[name] = input;
+      form.append(element("label", "", `${label} `), input);
+    });
+    function updateBackendConstraints() {
+      timeMinutes.max = backend.value === "iqm" ? "15" : "240";
+      if (backend.value === "iqm" && Number(timeMinutes.value) > 15) {
+        timeMinutes.value = "15";
+      }
+      [...example.options].forEach((option) => {
+        option.disabled = !String(option.dataset.backends || "")
+          .split(",").includes(backend.value);
+      });
+      if (example.selectedOptions[0]?.disabled) {
+        example.value = [...example.options]
+          .find((option) => !option.disabled)?.value || "";
+      }
+    }
+    backend.addEventListener("change", updateBackendConstraints);
+    updateBackendConstraints();
     const requirements = {};
     [
       ["circ_count", "Circuits", 1],
@@ -521,6 +816,23 @@
     const preview = element("button", "", "Preview allocation");
     preview.type = "button";
     const previewOutput = element("code", "qfw-command-preview");
+    const preset = element("select");
+    const presetKey = `${storageKey()}.experiment-presets`;
+    function readPresets() {
+      try {
+        return JSON.parse(window.localStorage.getItem(presetKey) || "{}");
+      } catch (error) {
+        return {};
+      }
+    }
+    function renderPresets() {
+      preset.replaceChildren(element("option", "", "saved presets"));
+      Object.keys(readPresets()).sort().forEach((name) => {
+        const option = element("option", "", name);
+        option.value = name;
+        preset.append(option);
+      });
+    }
     function formPayload() {
       return {
         identity: activeIdentity,
@@ -528,8 +840,14 @@
         example: example.value,
         allocation_mode: mode.value,
         shots: Number(shots.value),
-        nodes: 1,
+        time_minutes: Number(timeMinutes.value),
+        chemistry_app: chemistryApp.value,
         workload_kind: workload.value,
+        ...Object.fromEntries(
+          Object.entries(classical).map(([name, input]) => [
+            name, input.type === "number" ? Number(input.value) : input.value,
+          ]),
+        ),
         ...Object.fromEntries(
           Object.entries(requirements).map(([name, input]) => [
             name, Number(input.value),
@@ -537,12 +855,49 @@
         ),
       };
     }
+    function applyPreset(payload) {
+      backend.value = payload.backend || "nwqsim";
+      example.value = payload.example || "qiskit-simple";
+      mode.value = payload.allocation_mode || "normal";
+      workload.value = payload.workload_kind || "quantum";
+      shots.value = String(payload.shots || 16);
+      timeMinutes.value = String(payload.time_minutes || 45);
+      chemistryApp.value = payload.chemistry_app || "";
+      Object.entries(classical).forEach(([name, input]) => {
+        if (payload[name] !== undefined) input.value = String(payload[name]);
+      });
+      Object.entries(requirements).forEach(([name, input]) => {
+        if (payload[name] !== undefined) input.value = String(payload[name]);
+      });
+      updateBackendConstraints();
+    }
+    renderPresets();
+    preset.addEventListener("change", () => {
+      const payload = readPresets()[preset.value];
+      if (payload) applyPreset(payload);
+    });
+    const savePreset = element("button", "", "Save preset");
+    savePreset.type = "button";
+    savePreset.addEventListener("click", () => {
+      const name = window.prompt("Preset name");
+      if (!name || !/^[A-Za-z0-9_.-]+$/.test(name)) return;
+      const presets = readPresets();
+      const payload = formPayload();
+      delete payload.identity;
+      presets[name] = payload;
+      window.localStorage.setItem(presetKey, JSON.stringify(presets));
+      renderPresets();
+      preset.value = name;
+    });
     form.append(
       element("label", "", "Backend "), backend,
       element("label", "", "Example "), example,
       element("label", "", "Allocation "), mode,
       element("label", "", "Workload "), workload,
       element("label", "", "Shots "), shots,
+      element("label", "", "Time limit (minutes) "), timeMinutes,
+      element("label", "", "Chemistry application "), chemistryApp,
+      element("label", "", "Preset "), preset, savePreset,
       preview, submit, previewOutput,
     );
     preview.addEventListener("click", async () => {
@@ -675,7 +1030,8 @@
     return (mode !== "logs" || event.kind === "log")
       && (!component || event.component === component)
       && (!contextValue || [event.instance, event.node, event.job_id,
-        event.service_id, event.reservation_id].includes(contextValue))
+        event.service_id, event.reservation_id,
+        event.experiment_id].includes(contextValue))
       && (!severity || event.severity === severity)
       && (!since || timestamp >= Date.now() - since)
       && (!search || JSON.stringify(event).toLowerCase().includes(search));
@@ -707,6 +1063,15 @@
         const option = element("option", "", name || "all components");
         option.value = name;
         component.append(option);
+      });
+    const source = element("select");
+    source.dataset.qfwFilter = "source";
+    ["application", "slurm", "gateway", "directory", "nwqsim-qpm",
+      "nwqsim-dvm", "nwqsim-simulator", "iqm-qpm", "iqm-provider"]
+      .forEach((name) => {
+        const option = element("option", "", name);
+        option.value = name;
+        source.append(option);
       });
     const severity = element("select");
     severity.dataset.qfwFilter = "severity";
@@ -742,7 +1107,7 @@
       option.value = label.toLowerCase();
       mode.append(option);
     });
-    [mode, component, contextFilter, severity, time, search].forEach((control) => {
+    [mode, source, component, contextFilter, severity, time, search].forEach((control) => {
       control.addEventListener("input", renderProgress);
       tools.append(control);
     });
@@ -751,7 +1116,8 @@
       progressEvents.filter((item) => !component.value
         || item.component === component.value).forEach((item) => {
         [item.instance, item.node, item.job_id, item.service_id,
-          item.reservation_id].filter(Boolean).forEach((value) => values.add(value));
+          item.reservation_id, item.experiment_id]
+          .filter(Boolean).forEach((value) => values.add(value));
       });
       contextFilter.replaceChildren(element("option", "", "all instances"));
       [...values].sort().forEach((value) => {
@@ -777,10 +1143,41 @@
       }
       eventCursor = Number(payload.cursor || eventCursor);
       progressEvents = [...progressEvents, ...(payload.events || [])].slice(-2000);
+      const pane = runtimeApi.elements.progressOutputPane;
+      const mode = pane.querySelector("[data-qfw-filter=mode]")?.value;
+      const source = pane.querySelector("[data-qfw-filter=source]")?.value;
+      const instance = pane.querySelector("[data-qfw-filter=context]")?.value || "";
+      if (mode === "logs" && source && (source !== "application" || instance)) {
+        const key = `${source}:${instance}`;
+        const logs = await request(
+          `/api/qfw-dashboard/logs?source=${encodeURIComponent(source)}`
+            + `&cursor=${Number(logCursors[key] || 0)}&limit=500`
+            + `&identity=${encodeURIComponent(progressIdentity)}`
+            + `&instance=${encodeURIComponent(instance)}`,
+        );
+        if (logs.gap) {
+          progressEvents.push({
+            kind: "gap", component: source, severity: "warning",
+            message: "log source rotated or exceeded the bounded read window",
+          });
+        }
+        logCursors[key] = Number(logs.cursor || logCursors[key] || 0);
+        progressEvents = [...progressEvents, ...(logs.events || [])].slice(-2000);
+      }
       renderProgress();
     } catch (error) {
       // Other dashboard state remains usable when logs are unavailable.
     }
+  }
+
+  async function pollState() {
+    await refreshState();
+    if (runtimeApi) polling = window.setTimeout(pollState, 2500);
+  }
+
+  async function pollEvents() {
+    await refreshEvents();
+    if (runtimeApi) eventPolling = window.setTimeout(pollEvents, 1200);
   }
 
   function activate(runtime) {
@@ -793,15 +1190,13 @@
     connectWidgetChannel();
     installProgressTools();
     renderDashboard();
-    refreshState();
-    refreshEvents();
-    polling = window.setInterval(refreshState, 2500);
-    eventPolling = window.setInterval(refreshEvents, 1200);
+    pollState();
+    pollEvents();
   }
 
   function deactivate() {
-    window.clearInterval(polling);
-    window.clearInterval(eventPolling);
+    window.clearTimeout(polling);
+    window.clearTimeout(eventPolling);
     polling = null;
     eventPolling = null;
     widgetChannel?.close();
