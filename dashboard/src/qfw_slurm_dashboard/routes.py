@@ -13,7 +13,7 @@ from electroboy.service.registry import RouteDefinition
 from electroboy.service.routes import RouteRequest
 
 from .service import DashboardService
-from .runner import IDENTITIES
+from .models import utc_now
 
 _SERVICES: dict[tuple[Path, Path], DashboardService] = {}
 _SERVICES_LOCK = Lock()
@@ -50,7 +50,15 @@ def _error(error: Exception) -> JsonResponse:
         status = HTTPStatus.BAD_REQUEST
     else:
         status = HTTPStatus.CONFLICT
-    return JsonResponse({"error": str(error)}, status=status)
+    return JsonResponse({
+        "schema": "qfw-dashboard-error-v1",
+        "outcome": "error",
+        "timestamp": utc_now(),
+        "error": {
+            "type": error.__class__.__name__,
+            "message": str(error),
+        },
+    }, status=status)
 
 
 def _state(request: RouteRequest) -> JsonResponse:
@@ -67,6 +75,30 @@ def _events(request: RouteRequest) -> JsonResponse:
         limit = int((request.params.get("limit") or ["500"])[0])
         identity = str((request.params.get("identity") or [""])[0])
         return JsonResponse(_service(request).events(cursor, limit, identity))
+    except Exception as error:
+        return _error(error)
+
+
+def _logs(request: RouteRequest) -> JsonResponse:
+    try:
+        return JsonResponse(_service(request).logs(
+            str((request.params.get("source") or [""])[0]),
+            int((request.params.get("cursor") or ["0"])[0]),
+            int((request.params.get("limit") or ["500"])[0]),
+            str((request.params.get("identity") or [""])[0]),
+            str((request.params.get("instance") or [""])[0]),
+        ))
+    except Exception as error:
+        return _error(error)
+
+
+def _artifact(request: RouteRequest) -> JsonResponse:
+    try:
+        return JsonResponse(_service(request).artifact(
+            str((request.params.get("experiment_id") or [""])[0]),
+            int((request.params.get("index") or ["0"])[0]),
+            str((request.params.get("identity") or [""])[0]),
+        ))
     except Exception as error:
         return _error(error)
 
@@ -95,7 +127,11 @@ def _operation(request: RouteRequest) -> JsonResponse:
 
 def _preview(request: RouteRequest) -> JsonResponse:
     try:
-        return JsonResponse({"command": _service(request).command_preview(request.body())})
+        return JsonResponse({
+            "schema": "qfw-dashboard-preview-v1",
+            "outcome": "success",
+            "command": _service(request).command_preview(request.body()),
+        })
     except Exception as error:
         return _error(error)
 
@@ -114,7 +150,35 @@ def _cancel(request: RouteRequest) -> JsonResponse:
         _service(request).cancel_experiment(
             str(body.get("experiment_id", "")), str(body.get("identity", ""))
         )
-        return JsonResponse({"status": "cancel-requested"})
+        return JsonResponse({
+            "schema": "qfw-dashboard-cancel-v1",
+            "outcome": "success",
+            "status": "cancel-requested",
+        })
+    except Exception as error:
+        return _error(error)
+
+
+def _retry(request: RouteRequest) -> JsonResponse:
+    try:
+        body = request.body()
+        experiment = _service(request).retry_experiment(
+            str(body.get("experiment_id", "")),
+            str(body.get("identity", "")),
+            body.get("submit_real_hardware") is True,
+        )
+        return JsonResponse(experiment.payload(), status=HTTPStatus.ACCEPTED)
+    except Exception as error:
+        return _error(error)
+
+
+def _compare(request: RouteRequest) -> JsonResponse:
+    try:
+        body = request.body()
+        return JsonResponse(_service(request).compare_results(
+            [str(item) for item in body.get("experiment_ids", [])],
+            str(body.get("identity", "")),
+        ))
     except Exception as error:
         return _error(error)
 
@@ -123,16 +187,18 @@ def _shell(request: RouteRequest) -> JsonResponse:
     try:
         body = request.body()
         identity = str(body.get("identity", ""))
-        if identity not in IDENTITIES:
-            raise ValueError("unsupported identity")
-        home = "/root" if identity == "root" else f"/workspace/home/{identity}"
+        target = str(body.get("target", "slurmctld"))
+        context = _service(request).shell_context(identity, target)
+        home = context["home"]
         session, _ = request.services.sessions.start_project_shell(
             request.context_id
         )
         command = (
             f"exec docker exec -it --user {identity} --workdir {home} "
             f"--env HOME={home} --env USER={identity} --env LOGNAME={identity} "
-            "slurmctld /bin/bash -l\r"
+            f"{target} /bin/bash -lc 'printf \"QFw cluster shell: "
+            f"user={identity} host={target} cwd={home} "
+            "cluster=QFw-SLURM-Cluster\\n\"; exec /bin/bash -l'\r"
         )
         request.services.sessions.send_project_shell_input(
             request.context_id, command, session.session_id
@@ -140,13 +206,16 @@ def _shell(request: RouteRequest) -> JsonResponse:
         _service(request).store.audit({
             "identity": identity,
             "action": "shell-start",
-            "target": "slurmctld",
+            "target": target,
             "request_id": session.session_id,
             "outcome": "started",
         })
         return JsonResponse({
+            "schema": "qfw-dashboard-shell-v1",
+            "outcome": "success",
             "status": "started",
             "identity": identity,
+            "target": target,
             "shell_session": session.payload(selected=False),
         }, status=HTTPStatus.ACCEPTED)
     except Exception as error:
@@ -157,11 +226,15 @@ ROUTES = (
     route("GET", "/api/qfw-dashboard/state", "state", lease=False),
     route("GET", "/api/qfw-dashboard/diagnostics", "diagnostics", lease=False),
     route("GET", "/api/qfw-dashboard/events", "events", lease=False),
+    route("GET", "/api/qfw-dashboard/logs", "logs", lease=False),
+    route("GET", "/api/qfw-dashboard/artifact", "artifact", lease=False),
     route("GET", "/qfw-dashboard/widget", "widget", lease=False),
     route("POST", "/api/qfw-dashboard/operations", "operation"),
     route("POST", "/api/qfw-dashboard/preview", "preview"),
     route("POST", "/api/qfw-dashboard/experiments", "experiment"),
     route("POST", "/api/qfw-dashboard/experiments/cancel", "cancel"),
+    route("POST", "/api/qfw-dashboard/experiments/retry", "retry"),
+    route("POST", "/api/qfw-dashboard/results/compare", "compare"),
     route("POST", "/api/qfw-dashboard/shell", "shell"),
 )
 
@@ -169,10 +242,14 @@ HANDLERS: dict[str, Any] = {
     "state": _state,
     "diagnostics": _diagnostics,
     "events": _events,
+    "logs": _logs,
+    "artifact": _artifact,
     "widget": _widget,
     "operation": _operation,
     "preview": _preview,
     "experiment": _experiment,
     "cancel": _cancel,
+    "retry": _retry,
+    "compare": _compare,
     "shell": _shell,
 }

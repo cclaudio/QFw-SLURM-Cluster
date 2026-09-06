@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Experiment, Operation, utc_now
-from .redaction import redact
+from .redaction import redact, redact_payload
 
 
 class DashboardStore:
@@ -51,8 +51,9 @@ class DashboardStore:
 
     def save_experiment(self, experiment: Experiment) -> None:
         with self._lock:
+            payload = redact_payload(experiment.payload())
             self._write(
-                f"experiments/{experiment.experiment_id}.json", experiment.payload()
+                f"experiments/{experiment.experiment_id}.json", payload
             )
 
     def experiments(self) -> list[dict[str, Any]]:

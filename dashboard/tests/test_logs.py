@@ -1,0 +1,41 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from qfw_slurm_dashboard.logs import LogSource, SOURCES, read_source
+from qfw_slurm_dashboard.runner import CommandResult
+
+
+class Runner:
+    def cluster(self, identity, argv, **kwargs):
+        payload = {"cursor": 12, "gap": False, "lines": [
+            "INFO ready", "ERROR api_key=secret",
+        ]}
+        return CommandResult(tuple(argv), 0, json.dumps(payload), "")
+
+
+def test_log_reader_redacts_and_classifies() -> None:
+    page = read_source(
+        Runner(), SOURCES["gateway"], identity="root", cursor=0, limit=50
+    )
+    assert page["cursor"] == 12
+    assert page["events"][1]["severity"] == "error"
+    assert "secret" not in page["events"][1]["message"]
+
+
+def test_service_logs_are_not_exposed_to_regular_users() -> None:
+    with pytest.raises(PermissionError, match="root"):
+        read_source(
+            Runner(), SOURCES["iqm-qpm"], identity="user-a", cursor=0, limit=10
+        )
+
+
+def test_application_log_retains_captured_identity() -> None:
+    source = LogSource(
+        "application", "experiment", "slurmctld", "/tmp/output",
+        visibility="user-a",
+    )
+    page = read_source(Runner(), source, identity="user-a", cursor=5, limit=10)
+    assert page["events"][0]["identity"] == "user-a"
+    assert page["events"][0]["source_position"] == "5:5"
