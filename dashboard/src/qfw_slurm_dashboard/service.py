@@ -12,7 +12,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .collectors import collect_all, diagnostics, service_plane_status
+from .collectors import (
+    collect_all,
+    diagnostics,
+    inventory_status,
+    service_plane_status,
+)
 from .models import Experiment, Operation, aggregate_state, utc_now
 from .logs import LogSource, SOURCES, read_source
 from .runner import CommandRunner, IDENTITIES
@@ -226,6 +231,11 @@ class DashboardService:
             slurm_state = values[1].split()[0].upper() if len(values) > 1 else ""
             if slurm_state and slurm_state not in terminal:
                 experiment.status = slurm_state.lower()
+                if experiment.status != previous_status:
+                    experiment.timeline.append({
+                        "timestamp": utc_now(), "phase": experiment.status,
+                        "component": "slurm", "job_id": experiment.slurm_job_id,
+                    })
                 self.store.save_experiment(experiment)
                 if experiment.status != previous_status:
                     self.store.append_event({
@@ -316,6 +326,13 @@ class DashboardService:
                     "output_tail": output_text[-8000:],
                 }
                 experiment.completed_at = utc_now()
+                experiment.timeline.append({
+                    "timestamp": experiment.completed_at,
+                    "phase": experiment.status,
+                    "component": "application",
+                    "job_id": experiment.slurm_job_id,
+                    "reservation_release": "terminal",
+                })
                 self.store.save_experiment(experiment)
                 self.store.append_event({
                     "kind": "progress", "component": "application",
@@ -598,7 +615,17 @@ class DashboardService:
                 "electroboy_revision": self._revision(
                     self.cluster_root / "dashboard/external/electroboy"
                 ),
+                "backend_configuration": {
+                    "service_id": "nwqsim" if backend == "nwqsim"
+                    else "iqm-ornl-20q",
+                    "site_config": "/etc/openqse/qfw/site.yaml",
+                },
+                "deployment_inventory": inventory_status(self.runner).records,
             },
+            timeline=[{
+                "timestamp": utc_now(), "phase": "created",
+                "component": "dashboard",
+            }],
         )
         self.store.save_experiment(experiment)
         self.store.audit({
@@ -646,6 +673,10 @@ class DashboardService:
         self, experiment: Experiment, requirements: dict[str, Any]
     ) -> None:
         experiment.status = "submitting"
+        experiment.timeline.append({
+            "timestamp": utc_now(), "phase": "submitting",
+            "component": "slurm",
+        })
         self.store.save_experiment(experiment)
         shared_allocation = [f"--partition={requirements['partition']}"]
         for name in ("account", "qos"):
@@ -723,12 +754,20 @@ class DashboardService:
                 "error": result.stderr or result.stdout,
             }
             experiment.completed_at = utc_now()
+            experiment.timeline.append({
+                "timestamp": experiment.completed_at, "phase": "failed",
+                "component": "slurm", "classification": "submission",
+            })
         else:
             experiment.slurm_job_id = result.stdout.strip().split(";")[0]
             experiment.status = "submitted"
             experiment.artifacts = [
                 output_path
             ]
+            experiment.timeline.append({
+                "timestamp": utc_now(), "phase": "submitted",
+                "component": "slurm", "job_id": experiment.slurm_job_id,
+            })
         self.store.save_experiment(experiment)
         self.store.append_event({
             "kind": "progress",

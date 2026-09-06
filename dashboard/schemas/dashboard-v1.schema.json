@@ -114,7 +114,8 @@
         "reservations": {"type": "array"},
         "result": {"type": "object"},
         "artifacts": {"type": "array", "items": {"type": "string"}},
-        "manifest": {"type": "object"}
+        "manifest": {"type": "object"},
+        "timeline": {"type": "array", "items": {"type": "object"}}
       }
     },
     "progress_event": {

@@ -59,6 +59,7 @@ class Experiment:
     result: dict[str, Any] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)
     manifest: dict[str, Any] = field(default_factory=dict)
+    timeline: list[dict[str, Any]] = field(default_factory=list)
 
     def payload(self) -> dict[str, Any]:
         return {"schema": SCHEMA_VERSION, **asdict(self)}
