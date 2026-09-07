@@ -21,6 +21,27 @@ grep -q 'NWQSim QPM (nwqsim-head)' "${temporary}/status.out"
 grep -q 'IQM QPM (iqm-head)' "${temporary}/status.out"
 grep -q 'QFw Slurm gateway (slurmctld:18095)' "${temporary}/status.out"
 
+for target in directory nwqsim iqm; do
+	"${command}" --dry-run start --target "${target}" \
+		>"${temporary}/start-${target}.out"
+	"${command}" --dry-run status --target "${target}" \
+		>"${temporary}/status-${target}.out"
+	"${command}" --dry-run restart --target "${target}" \
+		>"${temporary}/restart-${target}.out"
+	"${command}" --dry-run recover --target "${target}" \
+		>"${temporary}/recover-${target}.out"
+done
+grep -q '^slurmctld: qfw-dir-svc start ' \
+	"${temporary}/start-directory.out"
+grep -q '^nwqsim-head: qfw-qpm-svc start ' \
+	"${temporary}/start-nwqsim.out"
+grep -q '^iqm-head: qfw-qpm-svc start ' \
+	"${temporary}/start-iqm.out"
+if "${command}" --dry-run status --target missing >/dev/null 2>&1; then
+	echo "unknown target unexpectedly succeeded" >&2
+	exit 1
+fi
+
 "${command}" --dry-run stop >"${temporary}/stop.out"
 iqm_line="$(grep -n '^iqm-head:' "${temporary}/stop.out" | cut -d: -f1)"
 nwqsim_line="$(grep -n '^nwqsim-head:' "${temporary}/stop.out" | cut -d: -f1)"

@@ -16,69 +16,32 @@ cd /path/to/QFw-SLURM-Cluster
 Inside `slurmctld`:
 
 ```bash
-export QFW_SHARED_ROOT=/workspace/qfw-container-base
-export QFW_SITE_CONFIG=/etc/openqse/qfw/site.yaml
-
-source /opt/openqse/qfw/bin/qfw-activate \
-  --venv /opt/openqse/qfw-venv
-
-qfw-dir-svc status --run-dir /var/lib/qfw-site-services/directory || \
-qfw-dir-svc start \
-  --scope site \
-  --run-dir /var/lib/qfw-site-services/directory \
-  --site-config "${QFW_SITE_CONFIG}" \
-  --timeout 300
-
-qfw-deactivate
-exit
+qfw-site-services start --target directory
+qfw-site-services status --target directory
 ```
 
-Run `man 1 qfw-dir-svc` for directory lifecycle details. The command writes
-the client-readable connection record beneath `${QFW_SHARED_ROOT}`.
+Run `man 8 qfw-site-services` for target selection and lifecycle details. The
+manager writes the client-readable connection record beneath
+`${QFW_SHARED_ROOT}`.
 
 ## Start NWQSim
 
-Enter the NWQSim head node as root:
+Remain on `slurmctld` and run:
 
 ```bash
-./do_ssh.sh nwqsim-head
+qfw-site-services start --target nwqsim
+qfw-site-services status --target nwqsim
 ```
 
-Then run:
-
-```bash
-export QFW_SHARED_ROOT=/workspace/qfw-container-base
-export QFW_SITE_CONFIG=/etc/openqse/qfw/site.yaml
-export QFW_SIMULATOR_NODES=nwqsim-head,nwqsim-worker-1,nwqsim-worker-2
-
-source /opt/openqse/qfw/bin/qfw-activate \
-  --venv /opt/openqse/qfw-venv
-
-qfw-qpm-svc start \
-  --scope site \
-  --run-dir /var/lib/qfw-site-services/qpm/nwqsim \
-  --site-config "${QFW_SITE_CONFIG}" \
-  --service-id nwqsim \
-  --timeout 300
-
-qfw-qpm-svc status \
-  --run-dir /var/lib/qfw-site-services/qpm/nwqsim
-qfw-deactivate
-```
-
-Run `man 1 qfw-qpm-svc` for QPMd and DVM lifecycle details. The manager loads
+The manager executes the lower-level QFw lifecycle on `nwqsim-head` and loads
 the declared libfabric, Open MPI, and NWQSim modules automatically.
 
 ## Stop NWQSim
 
-On `nwqsim-head`:
+On `slurmctld`:
 
 ```bash
-source /opt/openqse/qfw/bin/qfw-activate \
-  --venv /opt/openqse/qfw-venv
-qfw-qpm-svc stop \
-  --run-dir /var/lib/qfw-site-services/qpm/nwqsim
-qfw-deactivate
+qfw-site-services stop --target nwqsim
 ```
 
 Stop the directory separately only when no other QPMd uses it.

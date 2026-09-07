@@ -4,7 +4,8 @@ qfw-site-services \- manage the virtual cluster QFw service plane
 .SH SYNOPSIS
 .B qfw-site-services
 .RB [ \-\-dry-run ]
-.BR start | status | stop
+.RB [ \-\-target " " target ]
+.BR start | status | stop | restart | recover
 .SH DESCRIPTION
 .B qfw-site-services
 starts and stops the administrator-owned site directory, NWQSim DVM and QPM,
@@ -16,16 +17,38 @@ service nodes.
 .SH ACTIONS
 .TP
 .B start
-Start the directory service, NWQSim service, and IQM service in dependency
-order.  Partial startup failure removes only components created by that
-invocation.
+Start the selected target.  The default
+.B all
+target starts the directory service, NWQSim service, and IQM service in
+dependency order.  Partial aggregate startup failure removes only components
+created by that invocation.  Starting a QPM target requires a ready directory
+service.
 .TP
 .B status
 Report the state of each service manager and the gateway endpoint.
 .TP
 .B stop
-Stop the IQM QPM, NWQSim QPM and DVM, then the directory service.
+Stop the selected target.  The default aggregate action stops the IQM QPM,
+NWQSim QPM and DVM, then the directory service.  A targeted directory stop is
+rejected while a managed QPM remains ready.
+.TP
+.B restart
+Stop and then start the selected target.  A stop failure prevents startup.
+.TP
+.B recover
+Attempt to stop the selected target, tolerate stale or already-stopped state,
+and then start it.
 .SH OPTIONS
+.TP
+.BI \-\-target " target"
+Select
+.BR all ,
+.BR directory ,
+.BR nwqsim ,
+or
+.BR iqm .
+The default is
+.BR all .
 .TP
 .B \-\-dry-run
 Print the remote commands and dependency order without executing them.
@@ -54,8 +77,9 @@ Default administrator-owned manager state root on each service host.
 .SH EXAMPLES
 .nf
 qfw-site-services start
-qfw-site-services status
-qfw-site-services stop
+qfw-site-services status --target nwqsim
+qfw-site-services recover --target iqm
+qfw-site-services stop --target all
 .fi
 .SH SECURITY
 The command requires root for live actions.  It passes protected configuration

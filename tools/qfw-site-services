@@ -19,19 +19,24 @@ directory_run_dir="${QFW_SITE_RUN_ROOT}/directory"
 nwqsim_run_dir="${QFW_SITE_RUN_ROOT}/qpm/nwqsim"
 iqm_run_dir="${QFW_SITE_RUN_ROOT}/qpm/iqm-ornl-20q"
 dry_run=false
+target=all
 
 usage() {
 	cat <<EOF
-Usage: qfw-site-services [--dry-run] start|status|stop
+Usage: qfw-site-services [--dry-run] [--target TARGET] ACTION
 
 Manage the virtual cluster's administrator-owned QFw service plane.
 
 Actions:
-  start      Start the directory, NWQSim DVM/QPM, and IQM QPM
-  status     Report each service manager and gateway endpoint
-  stop       Stop both QPMs and then the directory service
+  start      Start the selected service or the complete service plane
+  status     Report the selected service or complete service plane
+  stop       Stop the selected service or the complete service plane
+  restart    Stop and start the selected target
+  recover    Best-effort stop, then start the selected target
 
 Options:
+  --target TARGET
+             Select all, directory, nwqsim, or iqm (default: all)
   --dry-run  Print the commands without executing them
 EOF
 }
@@ -127,6 +132,76 @@ stop_iqm() {
 		--run-dir "${iqm_run_dir}"
 }
 
+directory_ready() {
+	run_qfw "${QFW_DIR_NODE}" qfw-dir-svc status \
+		--run-dir "${directory_run_dir}"
+}
+
+nwqsim_ready() {
+	run_qfw "${QFW_NWQSIM_NODE}" qfw-qpm-svc status \
+		--run-dir "${nwqsim_run_dir}"
+}
+
+iqm_ready() {
+	run_qfw "${QFW_IQM_NODE}" qfw-qpm-svc status \
+		--run-dir "${iqm_run_dir}"
+}
+
+require_directory() {
+	if directory_ready >/dev/null 2>&1; then
+		return 0
+	fi
+	echo "qfw-site-services: directory service must be ready" >&2
+	return 1
+}
+
+require_directory_dependents_stopped() {
+	local active=()
+
+	if ${dry_run}; then
+		return 0
+	fi
+	if nwqsim_ready >/dev/null 2>&1; then
+		active+=(nwqsim)
+	fi
+	if iqm_ready >/dev/null 2>&1; then
+		active+=(iqm)
+	fi
+	if (( ${#active[@]} == 0 )); then
+		return 0
+	fi
+	echo "qfw-site-services: stop directory dependents first: ${active[*]}" >&2
+	return 1
+}
+
+start_directory() {
+	run_qfw "${QFW_DIR_NODE}" qfw-dir-svc start \
+		--scope site \
+		--run-dir "${directory_run_dir}" \
+		--site-config "${QFW_SITE_CONFIG}" \
+		--timeout "${QFW_SITE_START_TIMEOUT}"
+}
+
+start_nwqsim() {
+	require_directory || return 1
+	run_qfw "${QFW_NWQSIM_NODE}" qfw-qpm-svc start \
+		--scope site \
+		--run-dir "${nwqsim_run_dir}" \
+		--site-config "${QFW_SITE_CONFIG}" \
+		--service-id nwqsim \
+		--timeout "${QFW_SITE_START_TIMEOUT}"
+}
+
+start_iqm() {
+	require_directory || return 1
+	run_qfw "${QFW_IQM_NODE}" qfw-qpm-svc start \
+		--scope site \
+		--run-dir "${iqm_run_dir}" \
+		--site-config "${QFW_SITE_CONFIG}" \
+		--service-id iqm-ornl-20q \
+		--timeout "${QFW_SITE_START_TIMEOUT}"
+}
+
 start_services() {
 	local directory_started=false
 	local nwqsim_started=false
@@ -136,32 +211,18 @@ start_services() {
 		echo "NWQSim simulator nodes: ${QFW_SIMULATOR_NODES}"
 	fi
 
-	if ! run_qfw "${QFW_DIR_NODE}" qfw-dir-svc start \
-			--scope site \
-			--run-dir "${directory_run_dir}" \
-			--site-config "${QFW_SITE_CONFIG}" \
-			--timeout "${QFW_SITE_START_TIMEOUT}"; then
+	if ! start_directory; then
 		return 1
 	fi
 	directory_started=true
 
-	if ! run_qfw "${QFW_NWQSIM_NODE}" qfw-qpm-svc start \
-			--scope site \
-			--run-dir "${nwqsim_run_dir}" \
-			--site-config "${QFW_SITE_CONFIG}" \
-			--service-id nwqsim \
-			--timeout "${QFW_SITE_START_TIMEOUT}"; then
+	if ! start_nwqsim; then
 		${directory_started} && stop_directory >/dev/null 2>&1 || true
 		return 1
 	fi
 	nwqsim_started=true
 
-	if ! run_qfw "${QFW_IQM_NODE}" qfw-qpm-svc start \
-			--scope site \
-			--run-dir "${iqm_run_dir}" \
-			--site-config "${QFW_SITE_CONFIG}" \
-			--service-id iqm-ornl-20q \
-			--timeout "${QFW_SITE_START_TIMEOUT}"; then
+	if ! start_iqm; then
 		${nwqsim_started} && stop_nwqsim >/dev/null 2>&1 || true
 		${directory_started} && stop_directory >/dev/null 2>&1 || true
 		return 1
@@ -210,17 +271,76 @@ stop_services() {
 	return "${status}"
 }
 
+target_status() {
+	case "${target}" in
+	all)
+		service_status
+		;;
+	directory)
+		echo "Directory service (${QFW_DIR_NODE})"
+		directory_ready
+		;;
+	nwqsim)
+		echo "NWQSim QPM (${QFW_NWQSIM_NODE})"
+		nwqsim_ready
+		;;
+	iqm)
+		echo "IQM QPM (${QFW_IQM_NODE})"
+		iqm_ready
+		;;
+	esac
+}
+
+start_target() {
+	case "${target}" in
+	all) start_services ;;
+	directory) start_directory ;;
+	nwqsim) start_nwqsim ;;
+	iqm) start_iqm ;;
+	esac
+}
+
+stop_target() {
+	case "${target}" in
+	all) stop_services ;;
+	directory)
+		require_directory_dependents_stopped || return 1
+		stop_directory
+		;;
+	nwqsim) stop_nwqsim ;;
+	iqm) stop_iqm ;;
+	esac
+}
+
+restart_target() {
+	stop_target && start_target
+}
+
+recover_target() {
+	stop_target || true
+	start_target
+}
+
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--dry-run)
 		dry_run=true
 		shift
 		;;
+	--target)
+		[[ $# -ge 2 ]] || die "--target requires a value"
+		target="$2"
+		shift 2
+		;;
+	--target=*)
+		target="${1#*=}"
+		shift
+		;;
 	-h|--help)
 		usage
 		exit 0
 		;;
-	start|status|stop)
+	start|status|stop|restart|recover)
 		[[ -z "${action:-}" ]] || die "only one action may be specified"
 		action="$1"
 		shift
@@ -235,18 +355,28 @@ done
 	usage >&2
 	exit 2
 }
+case "${target}" in
+all|directory|nwqsim|iqm) ;;
+*) die "unknown target: ${target}" ;;
+esac
 if ! ${dry_run} && [[ ${EUID} -ne 0 ]]; then
 	die "must run as root"
 fi
 
 case "${action}" in
 start)
-	start_services
+	start_target
 	;;
 status)
-	service_status
+	target_status
 	;;
 stop)
-	stop_services
+	stop_target
+	;;
+restart)
+	restart_target
+	;;
+recover)
+	recover_target
 	;;
 esac

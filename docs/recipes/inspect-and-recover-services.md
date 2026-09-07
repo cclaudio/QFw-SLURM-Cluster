@@ -23,25 +23,17 @@ should be in `qfw-services`, not allocated to application jobs.
 qfw-site-services status
 ```
 
-Run `man 8 qfw-site-services` for state and exit-status details. For the
-directory or one QPM manager, activate QFw on its owning node and inspect the
-private run directory:
+Run `man 8 qfw-site-services` for state and exit-status details. Inspect one
+managed target from `slurmctld` with:
 
 ```bash
-source /opt/openqse/qfw/bin/qfw-activate \
-  --venv /opt/openqse/qfw-venv
-
-qfw-dir-svc status --run-dir /var/lib/qfw-site-services/directory
-qfw-qpm-svc status --run-dir /var/lib/qfw-site-services/qpm/nwqsim
-qfw-qpm-svc status \
-  --run-dir /var/lib/qfw-site-services/qpm/iqm-ornl-20q
-
-qfw-deactivate
+qfw-site-services status --target directory
+qfw-site-services status --target nwqsim
+qfw-site-services status --target iqm
 ```
 
-Run `man 1 qfw-dir-svc` and `man 1 qfw-qpm-svc` before changing manager state.
-The directory command belongs on `slurmctld`; each QPM command belongs on its
-QPM host.
+The site manager performs remote-node placement. Administrators do not invoke
+the lower-level QFw lifecycle commands directly.
 
 ## Inspect as an Application User
 
@@ -70,8 +62,7 @@ starting, stopped, and stale state and preserve useful diagnostics.
 From `slurmctld` as root:
 
 ```bash
-qfw-site-services stop
-qfw-site-services start
+qfw-site-services recover --target all
 qfw-site-services status
 ```
 
