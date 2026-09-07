@@ -5,6 +5,7 @@
   const IDENTITIES = ["user-a", "user-b", "user-c", "root"];
   const WIDGETS = [
     ["health", "Cluster health"],
+    ["inventory", "Version and configuration inventory"],
     ["nodes", "Nodes"],
     ["services", "Services"],
     ["allocations", "Allocations"],
@@ -139,7 +140,6 @@
       return {
         health: state.health,
         observed_at: state.observed_at,
-        inventory: selectedSource("inventory").records,
         sources: Object.values(state.sources || {}).map((source) => ({
           name: source.name,
           status: source.status,
@@ -148,6 +148,7 @@
         })),
       };
     }
+    if (id === "inventory") return selectedSource("inventory").records;
     if (id === "nodes") return slurm.records.filter((item) => item.kind === "node");
     if (id === "services") return services.records;
     if (id === "allocations") {
@@ -192,11 +193,29 @@
     root.append(table(payload.sources || [], [
       ["name", "Source"], ["status", "State"], ["observed_at", "Observed"],
     ]));
-    root.append(element("h4", "", "Version and configuration inventory"));
-    root.append(table(payload.inventory || [], [
-      ["kind", "Kind"], ["component", "Component"],
-      ["value", "Version, revision, or fingerprint"], ["path", "Path"],
-    ]));
+    return root;
+  }
+
+  function renderAlerts(payload) {
+    const root = element("div", "qfw-alerts");
+    if (!payload.length) {
+      root.append(element("p", "qfw-empty", "No active alerts"));
+      return root;
+    }
+    payload.forEach((alert) => {
+      const panel = element("article", "qfw-alert");
+      const header = element("header", "qfw-alert-header");
+      header.append(
+        element("strong", "qfw-alert-component", alert.component || "unknown component"),
+        element("span", `qfw-state qfw-${alert.state || "unavailable"}`,
+          alert.state || "unavailable"),
+      );
+      const detail = element("pre", "qfw-alert-detail");
+      detail.textContent = typeof alert.detail === "string"
+        ? alert.detail : JSON.stringify(alert.detail, null, 2);
+      panel.append(header, detail);
+      root.append(panel);
+    });
     return root;
   }
 
@@ -204,12 +223,14 @@
     const root = element("div", "qfw-topology");
     const controls = element("div", "qfw-inline-controls");
     const projection = element("select");
+    projection.className = "qfw-topology-projection";
     ["Cluster", "Experiment"].forEach((label) => {
       const option = element("option", "", label);
       option.value = label.toLowerCase();
       projection.append(option);
     });
     projection.value = widgetStates.topology?.projection || "cluster";
+    projection.selectedOptions[0]?.setAttribute("selected", "selected");
     projection.addEventListener("change", () => {
       widgetStates.topology = { ...widgetStates.topology, projection: projection.value };
       savePresentation();
@@ -217,18 +238,24 @@
       publishWidgets();
     });
     const filter = element("input");
+    filter.className = "qfw-topology-filter";
     filter.placeholder = "filter objects";
     filter.value = widgetStates.topology?.filter || "";
+    filter.setAttribute("value", filter.value);
     const zoom = element("input");
+    zoom.className = "qfw-topology-zoom";
     zoom.type = "range";
     zoom.min = "60";
     zoom.max = "180";
     zoom.value = String(widgetStates.topology?.zoom || 100);
-    controls.append(
-      element("label", "", "Projection "), projection,
-      element("label", "", "Filter "), filter,
-      element("label", "", "Zoom "), zoom,
-    );
+    zoom.setAttribute("value", zoom.value);
+    const projectionLabel = element("label", "qfw-control-group", "Projection ");
+    projectionLabel.append(projection);
+    const filterLabel = element("label", "qfw-control-group", "Filter ");
+    filterLabel.append(filter);
+    const zoomControlLabel = element("label", "qfw-control-group", "Zoom ");
+    zoomControlLabel.append(zoom);
+    controls.append(projectionLabel, filterLabel, zoomControlLabel);
     root.append(controls);
     const objects = projection.value === "cluster"
       ? [
@@ -331,6 +358,7 @@
       group.setAttribute("transform", `translate(${35 + column * 215} ${35 + row * 100})`);
       group.setAttribute("tabindex", "0");
       group.setAttribute("role", "button");
+      group.dataset.objectId = item.id;
       const box = document.createElementNS("http://www.w3.org/2000/svg", "rect");
       box.setAttribute("width", "185");
       box.setAttribute("height", "64");
@@ -414,6 +442,12 @@
       payload = payload.filter((item) => JSON.stringify(item).toLowerCase().includes(query));
     }
     if (id === "health") return renderHealth(payload);
+    if (id === "inventory") {
+      return table(payload, [
+        ["kind", "Kind"], ["component", "Component"],
+        ["value", "Version, revision, or fingerprint"], ["path", "Path"],
+      ]);
+    }
     if (id === "nodes") {
       return table(payload, [
         ["node", "Node"], ["partition", "Partition"], ["state", "State"],
@@ -538,9 +572,7 @@
       return root;
     }
     if (id === "alerts") {
-      return table(payload, [
-        ["component", "Component"], ["state", "State"], ["detail", "Detail"],
-      ]);
+      return renderAlerts(payload);
     }
     if (id === "topology") return renderTopology(payload);
     return element("pre", "", JSON.stringify(payload, null, 2));
@@ -571,9 +603,20 @@
 
   function buildWidget(id, label) {
     const details = element("details", "qfw-widget");
+    let pulseHash = 0;
+    for (const character of id) {
+      pulseHash = ((pulseHash * 33) + character.charCodeAt(0)) >>> 0;
+    }
+    const pulseDuration = 10000 + (pulseHash % 6000);
+    const pulsePhase = (Date.now() + (pulseHash * 104729)) % pulseDuration;
+    details.style.setProperty("--qfw-pulse-duration", `${pulseDuration}ms`);
+    details.style.setProperty("--qfw-pulse-delay", `${-pulsePhase}ms`);
     details.dataset.widget = id;
     details.open = widgetStates[id]?.expanded !== false;
     const summary = element("summary");
+    const chevron = element("span", "qfw-widget-chevron", "›");
+    chevron.setAttribute("aria-hidden", "true");
+    summary.append(chevron);
     summary.append(element("span", "qfw-widget-title", label));
     const filter = element("input", "qfw-widget-filter");
     filter.type = "search";
@@ -609,86 +652,309 @@
     return details;
   }
 
-  function actionButton(label, action, destructive = false) {
-    const button = element("button", destructive ? "danger" : "", label);
-    button.type = "button";
-    button.disabled = activeIdentity !== "root";
-    button.addEventListener("click", async () => {
-      const revision = selectedSource("inventory").records.find((item) =>
-        item.kind === "revision" && item.component === "QFw-SLURM-Cluster")?.value
-        || "unknown";
-      const consequence = action === "cluster-recreate"
-        ? "\nThis removes and recreates cluster containers and named volumes."
-        : "";
-      if (!window.confirm(
-        `${label} as ${activeIdentity}?\nRepository: ${runtimeApi.state.activeProjectRoot}`
-          + `\nRevision: ${revision}\nTarget: cluster${consequence}`,
-      )) return;
+  function canvasCamera() {
+    const saved = widgetStates.canvas || {};
+    return {
+      x: Number.isFinite(Number(saved.x)) ? Number(saved.x) : 32,
+      y: Number.isFinite(Number(saved.y)) ? Number(saved.y) : 32,
+      scale: Math.min(2.25, Math.max(0.35,
+        Number.isFinite(Number(saved.scale)) ? Number(saved.scale) : 1)),
+    };
+  }
+
+  function saveCanvasCamera(camera) {
+    widgetStates.canvas = { x: camera.x, y: camera.y, scale: camera.scale };
+    savePresentation();
+  }
+
+  function installCanvasInteraction(viewport, stage, zoomLabel) {
+    const camera = canvasCamera();
+    let pan = null;
+
+    function apply() {
+      stage.style.left = `${camera.x / camera.scale}px`;
+      stage.style.top = `${camera.y / camera.scale}px`;
+      stage.style.zoom = String(camera.scale);
+      zoomLabel.textContent = `${Math.round(camera.scale * 100)}%`;
+    }
+
+    function zoomAt(clientX, clientY, factor) {
+      const bounds = viewport.getBoundingClientRect();
+      const localX = clientX - bounds.left;
+      const localY = clientY - bounds.top;
+      const previous = camera.scale;
+      const next = Math.min(2.25, Math.max(0.35, previous * factor));
+      const worldX = (localX - camera.x) / previous;
+      const worldY = (localY - camera.y) / previous;
+      camera.scale = next;
+      camera.x = localX - worldX * next;
+      camera.y = localY - worldY * next;
+      apply();
+      saveCanvasCamera(camera);
+    }
+
+    viewport.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.0015));
+    }, { passive: false });
+    viewport.addEventListener("pointerdown", (event) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      pan = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      viewport.setPointerCapture(event.pointerId);
+      viewport.classList.add("is-panning");
+    });
+    viewport.addEventListener("pointermove", (event) => {
+      if (!pan || pan.pointerId !== event.pointerId) return;
+      camera.x += event.clientX - pan.x;
+      camera.y += event.clientY - pan.y;
+      pan.x = event.clientX;
+      pan.y = event.clientY;
+      apply();
+    });
+    function finishPan(event) {
+      if (!pan || pan.pointerId !== event.pointerId) return;
+      pan = null;
+      viewport.classList.remove("is-panning");
+      saveCanvasCamera(camera);
+    }
+    viewport.addEventListener("pointerup", finishPan);
+    viewport.addEventListener("pointercancel", finishPan);
+    viewport.addEventListener("auxclick", (event) => {
+      if (event.button === 1) event.preventDefault();
+    });
+    apply();
+
+    return {
+      reset() {
+        camera.x = 32;
+        camera.y = 32;
+        camera.scale = 1;
+        apply();
+        saveCanvasCamera(camera);
+      },
+      zoom(factor) {
+        const bounds = viewport.getBoundingClientRect();
+        zoomAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, factor);
+      },
+    };
+  }
+
+  const selectedOperations = {};
+  const operationFormState = {
+    cluster: "start",
+    serviceTarget: "all",
+    serviceAction: "start",
+    node: "",
+    nodeAction: "drain",
+    reason: "qfw-dashboard",
+  };
+
+  function operationField(label, control) {
+    const field = element("label", "qfw-operation-field");
+    field.append(element("span", "", label), control);
+    return field;
+  }
+
+  function operationForGroup(group) {
+    const matching = (state.operations || []).filter((item) => {
+      if (group === "cluster") return item.action?.startsWith("cluster-");
+      if (group === "services") return item.action?.startsWith("service-");
+      return item.action?.startsWith("node-");
+    }).sort((left, right) => String(right.created_at)
+      .localeCompare(String(left.created_at)));
+    return matching.find((item) => item.operation_id === selectedOperations[group])
+      || matching[0] || null;
+  }
+
+  async function runOperation(group, payload) {
+    const response = await request("/api/qfw-dashboard/operations", {
+      method: "POST",
+      body: JSON.stringify({
+        ...payload,
+        identity: activeIdentity,
+        request_id: window.crypto.randomUUID(),
+      }),
+    });
+    selectedOperations[group] = response.operation_id;
+    await refreshState();
+  }
+
+  async function abortOperation(group) {
+    const operation = operationForGroup(group);
+    if (!operation) return;
+    await request("/api/qfw-dashboard/operations/abort", {
+      method: "POST",
+      body: JSON.stringify({
+        operation_id: operation.operation_id,
+        identity: activeIdentity,
+      }),
+    });
+    await refreshState();
+  }
+
+  function operationOutput(group) {
+    const operation = operationForGroup(group);
+    const output = element("pre", "qfw-operation-output");
+    if (!operation) {
+      output.textContent = "No operation has run in this group.";
+      return output;
+    }
+    const heading = [
+      `${operation.status.toUpperCase()} · ${operation.action}`,
+      `target=${operation.target} operation=${operation.operation_id}`,
+    ];
+    output.textContent = [...heading, ...(operation.output || [])].join("\n");
+    output.scrollTop = output.scrollHeight;
+    return output;
+  }
+
+  function operationButtons(group, submit) {
+    const buttons = element("div", "qfw-operation-buttons");
+    const run = element("button", "qfw-operation-run", "Run");
+    run.type = "button";
+    run.disabled = activeIdentity !== "root";
+    run.addEventListener("click", async () => {
       try {
-        await request("/api/qfw-dashboard/operations", {
-          method: "POST",
-          body: JSON.stringify({
-            action, identity: activeIdentity, request_id: window.crypto.randomUUID(),
-          }),
-        });
-        await refreshState();
+        await submit();
       } catch (error) {
         window.alert(error.message);
       }
     });
-    return button;
+    const abort = element("button", "danger", "Abort");
+    abort.type = "button";
+    const operation = operationForGroup(group);
+    abort.disabled = activeIdentity !== "root"
+      || !operation || !["queued", "running", "aborting"].includes(operation.status);
+    abort.addEventListener("click", async () => {
+      if (!window.confirm(`Abort ${operation?.action || "operation"}?`)) return;
+      try {
+        await abortOperation(group);
+      } catch (error) {
+        window.alert(error.message);
+      }
+    });
+    buttons.append(run, abort);
+    return buttons;
+  }
+
+  function operationGroup(title, group) {
+    const panel = element("article", `qfw-operation-group qfw-operation-${group}`);
+    panel.append(element("h4", "", title));
+    return panel;
   }
 
   function renderActions(root) {
     const controls = element("section", "qfw-actions");
     controls.append(element("h3", "", "Operations"));
-    controls.append(
-      actionButton("Start cluster", "cluster-start"),
-      actionButton("Stop cluster", "cluster-stop", true),
-      actionButton("Restart cluster", "cluster-restart", true),
-      actionButton("Recreate cluster", "cluster-recreate", true),
-      actionButton("Start services", "services-start"),
-      actionButton("Stop services", "services-stop", true),
-      actionButton("Restart services", "services-restart", true),
-      actionButton("Start directory", "directory-start"),
-      actionButton("Stop directory", "directory-stop", true),
-      actionButton("Restart directory", "directory-restart", true),
-      actionButton("Start NWQSim", "nwqsim-start"),
-      actionButton("Stop NWQSim", "nwqsim-stop", true),
-      actionButton("Restart NWQSim", "nwqsim-restart", true),
-      actionButton("Start IQM", "iqm-start"),
-      actionButton("Stop IQM", "iqm-stop", true),
-      actionButton("Restart IQM", "iqm-restart", true),
-      actionButton("Recover gateway", "gateway-restart", true),
+    const groups = element("div", "qfw-operation-groups");
+
+    const cluster = operationGroup("Cluster control", "cluster");
+    const clusterAction = element("select");
+    [["start", "Start"], ["stop", "Stop"], ["restart", "Restart"],
+      ["recreate", "Recreate"]].forEach(([value, label]) => {
+      const option = element("option", "", label);
+      option.value = value;
+      clusterAction.append(option);
+    });
+    clusterAction.value = operationFormState.cluster;
+    clusterAction.addEventListener("change", () => {
+      operationFormState.cluster = clusterAction.value;
+    });
+    cluster.append(
+      operationField("Operation", clusterAction),
+      operationButtons("cluster", async () => {
+        const operation = clusterAction.value;
+        const consequence = operation === "recreate"
+          ? " This removes and recreates containers and named volumes." : "";
+        if (!window.confirm(`${operation} cluster as root?${consequence}`)) return;
+        await runOperation("cluster", { action: `cluster-${operation}`, target: "cluster" });
+      }),
+      operationOutput("cluster"),
     );
+
+    const services = operationGroup("Service control", "services");
+    const serviceTarget = element("select");
+    [["all", "All services"], ["directory", "Directory"],
+      ["nwqsim", "NWQSim"], ["iqm", "IQM"], ["gateway", "Gateway"]]
+      .forEach(([value, label]) => {
+        const option = element("option", "", label);
+        option.value = value;
+        serviceTarget.append(option);
+      });
+    serviceTarget.value = operationFormState.serviceTarget;
+    serviceTarget.addEventListener("change", () => {
+      operationFormState.serviceTarget = serviceTarget.value;
+    });
+    const serviceAction = element("select");
+    ["start", "stop", "restart", "recover"].forEach((value) => {
+      const option = element("option", "", value[0].toUpperCase() + value.slice(1));
+      option.value = value;
+      serviceAction.append(option);
+    });
+    serviceAction.value = operationFormState.serviceAction;
+    serviceAction.addEventListener("change", () => {
+      operationFormState.serviceAction = serviceAction.value;
+    });
+    services.append(
+      operationField("Target", serviceTarget),
+      operationField("Operation", serviceAction),
+      operationButtons("services", async () => {
+        if (!window.confirm(
+          `${serviceAction.value} ${serviceTarget.value} as root?`,
+        )) return;
+        await runOperation("services", {
+          action: `service-${serviceAction.value}`,
+          target: serviceTarget.value,
+        });
+      }),
+      operationOutput("services"),
+    );
+
+    const nodes = operationGroup("Node control", "nodes");
     const node = element("input");
     node.placeholder = "node name";
+    node.value = operationFormState.node;
+    node.addEventListener("input", () => { operationFormState.node = node.value; });
+    const nodeAction = element("select");
+    [["drain", "Drain"], ["resume", "Resume"]].forEach(([value, label]) => {
+      const option = element("option", "", label);
+      option.value = value;
+      nodeAction.append(option);
+    });
+    nodeAction.value = operationFormState.nodeAction;
+    nodeAction.addEventListener("change", () => {
+      operationFormState.nodeAction = nodeAction.value;
+    });
     const reason = element("input");
     reason.placeholder = "drain reason";
-    reason.value = "qfw-dashboard";
-    function nodeAction(label, action) {
-      const button = element("button", "", label);
-      button.type = "button";
-      button.disabled = activeIdentity !== "root";
-      button.addEventListener("click", async () => {
-        if (!window.confirm(`${label} ${node.value} as ${activeIdentity}?`)) return;
-        try {
-          await request("/api/qfw-dashboard/operations", {
-            method: "POST",
-            body: JSON.stringify({
-              action, identity: activeIdentity, target: node.value,
-              reason: reason.value, request_id: window.crypto.randomUUID(),
-            }),
-          });
-        } catch (error) {
-          window.alert(error.message);
-        }
-      });
-      return button;
-    }
-    controls.append(node, reason,
-      nodeAction("Drain node", "node-drain"),
-      nodeAction("Resume node", "node-resume"));
+    reason.value = operationFormState.reason;
+    reason.addEventListener("input", () => {
+      operationFormState.reason = reason.value;
+    });
+    nodes.append(
+      operationField("Node", node),
+      operationField("Operation", nodeAction),
+      operationField("Reason", reason),
+      operationButtons("nodes", async () => {
+        if (!window.confirm(`${nodeAction.value} ${node.value} as root?`)) return;
+        await runOperation("nodes", {
+          action: `node-${nodeAction.value}`,
+          target: node.value,
+          reason: reason.value,
+        });
+      }),
+      operationOutput("nodes"),
+    );
+
+    groups.append(cluster, services, nodes);
+    controls.append(groups);
+    root.append(controls);
+  }
+
+  function renderAccess(root) {
+    const access = element("section", "qfw-access");
+    access.append(element("h3", "", "Cluster access"));
     const shellTarget = element("select");
     ["slurmctld", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8",
       "nwqsim-head", "nwqsim-worker-1", "nwqsim-worker-2", "iqm-head"]
@@ -699,7 +965,7 @@
           && (name.startsWith("nwqsim-") || name === "iqm-head");
         shellTarget.append(option);
       });
-    const shell = element("button", "", "Open selected cluster shell");
+    const shell = element("button", "", "Open cluster shell");
     shell.type = "button";
     shell.addEventListener("click", async () => {
       if (activeIdentity === "root"
@@ -715,8 +981,8 @@
         window.alert(error.message);
       }
     });
-    controls.append(shellTarget, shell);
-    root.append(controls);
+    access.append(operationField("Node", shellTarget), shell);
+    root.append(access);
   }
 
   function renderExperimentForm(root) {
@@ -929,11 +1195,48 @@
     root.append(form);
   }
 
+  function captureWidgetScrollPositions() {
+    const positions = {};
+    if (!dashboardRoot) return positions;
+    dashboardRoot.querySelectorAll(".qfw-widget[data-widget]").forEach((widget) => {
+      positions[widget.dataset.widget] = [
+        ...widget.querySelectorAll(
+          ".qfw-topology, .qfw-table-wrap, .qfw-alert-detail",
+        ),
+      ].map((container) => ({
+        left: container.scrollLeft,
+        top: container.scrollTop,
+      }));
+    });
+    return positions;
+  }
+
+  function restoreWidgetScrollPositions(positions) {
+    Object.entries(positions).forEach(([id, offsets]) => {
+      const widget = dashboardRoot?.querySelector(`[data-widget="${id}"]`);
+      if (!widget) return;
+      const containers = widget.querySelectorAll(
+        ".qfw-topology, .qfw-table-wrap, .qfw-alert-detail",
+      );
+      offsets.forEach((offset, index) => {
+        if (!containers[index]) return;
+        containers[index].scrollLeft = offset.left;
+        containers[index].scrollTop = offset.top;
+      });
+    });
+  }
+
   function renderDashboard() {
     if (!dashboardRoot) return;
+    const scrollPositions = captureWidgetScrollPositions();
     dashboardRoot.replaceChildren();
     const header = element("header", "qfw-dashboard-header");
-    header.append(element("h2", "", "QFw Slurm Cluster"));
+    const title = element("div", "qfw-dashboard-title");
+    title.append(
+      element("span", "qfw-dashboard-eyebrow", "OPENQSE OPERATIONS"),
+      element("h2", "", "QFw Slurm Cluster"),
+    );
+    header.append(title);
     const identity = element("select", "qfw-identity");
     IDENTITIES.forEach((name) => {
       const option = element("option", "", name);
@@ -949,18 +1252,41 @@
     });
     const identityLabel = element("label", "qfw-identity-label", "Cluster identity ");
     identityLabel.append(identity);
-    header.append(identityLabel);
+    const viewControls = element("div", "qfw-view-controls");
+    const zoomOut = element("button", "", "−");
+    const zoomLabel = element("output", "qfw-zoom-label", "100%");
+    const zoomIn = element("button", "", "+");
+    const reset = element("button", "", "Reset view");
+    [zoomOut, zoomIn, reset].forEach((button) => { button.type = "button"; });
+    viewControls.append(
+      element("span", "qfw-canvas-hint", "Wheel zoom · middle-drag pan"),
+      zoomOut, zoomLabel, zoomIn, reset,
+    );
+    header.append(viewControls, identityLabel);
     dashboardRoot.append(header);
+    const viewport = element("div", "qfw-canvas-viewport");
+    viewport.setAttribute("aria-label", "Zoomable dashboard canvas");
+    const stage = element("main", "qfw-canvas-stage");
     const grid = element("div", "qfw-widget-grid");
     WIDGETS.forEach(([id, label]) => grid.append(buildWidget(id, label)));
-    dashboardRoot.append(grid);
-    renderActions(dashboardRoot);
-    renderExperimentForm(dashboardRoot);
+    stage.append(grid);
+    renderActions(stage);
+    renderAccess(stage);
+    renderExperimentForm(stage);
+    viewport.append(stage);
+    dashboardRoot.append(viewport);
+    const camera = installCanvasInteraction(viewport, stage, zoomLabel);
+    zoomOut.addEventListener("click", () => camera.zoom(0.85));
+    zoomIn.addEventListener("click", () => camera.zoom(1 / 0.85));
+    reset.addEventListener("click", () => camera.reset());
+    restoreWidgetScrollPositions(scrollPositions);
   }
 
   function publishWidgets() {
     if (!widgetChannel) return;
     WIDGETS.forEach(([id, label]) => {
+      const payload = widgetPayload(id);
+      const rendered = renderWidgetBody(id, payload);
       widgetChannel.postMessage({
         type: "state",
         instance_id: `${contextId()}:${id}`,
@@ -969,7 +1295,8 @@
         cluster: "QFw-SLURM-Cluster",
         identity: activeIdentity,
         freshness: state.observed_at || "not observed",
-        payload: widgetPayload(id),
+        payload,
+        markup: rendered.outerHTML,
         presentation: widgetStates[id] || {},
       });
     });
@@ -1006,7 +1333,7 @@
     [...(state.operations || []), ...(state.experiments || [])].forEach((item) => {
       const id = item.operation_id || item.experiment_id;
       if (!id || notifiedTerminal.has(id)
-          || !["succeeded", "failed"].includes(item.status)) return;
+          || !["aborted", "succeeded", "failed"].includes(item.status)) return;
       notifiedTerminal.add(id);
       if (window.Notification?.permission === "granted") {
         new window.Notification(`QFw ${item.status}`, {

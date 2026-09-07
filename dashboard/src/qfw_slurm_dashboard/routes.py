@@ -125,6 +125,18 @@ def _operation(request: RouteRequest) -> JsonResponse:
         return _error(error)
 
 
+def _abort_operation(request: RouteRequest) -> JsonResponse:
+    try:
+        body = request.body()
+        operation = _service(request).abort_operation(
+            str(body.get("operation_id", "")),
+            str(body.get("identity", "")),
+        )
+        return JsonResponse(operation.payload(), status=HTTPStatus.ACCEPTED)
+    except Exception as error:
+        return _error(error)
+
+
 def _preview(request: RouteRequest) -> JsonResponse:
     try:
         return JsonResponse({
@@ -230,6 +242,7 @@ ROUTES = (
     route("GET", "/api/qfw-dashboard/artifact", "artifact", lease=False),
     route("GET", "/qfw-dashboard/widget", "widget", lease=False),
     route("POST", "/api/qfw-dashboard/operations", "operation"),
+    route("POST", "/api/qfw-dashboard/operations/abort", "abort-operation"),
     route("POST", "/api/qfw-dashboard/preview", "preview"),
     route("POST", "/api/qfw-dashboard/experiments", "experiment"),
     route("POST", "/api/qfw-dashboard/experiments/cancel", "cancel"),
@@ -246,6 +259,7 @@ HANDLERS: dict[str, Any] = {
     "artifact": _artifact,
     "widget": _widget,
     "operation": _operation,
+    "abort-operation": _abort_operation,
     "preview": _preview,
     "experiment": _experiment,
     "cancel": _cancel,

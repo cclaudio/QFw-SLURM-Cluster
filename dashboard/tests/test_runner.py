@@ -27,8 +27,10 @@ def test_cluster_runner_rejects_unknown_identity() -> None:
 
 def test_stream_host_delivers_each_output_line(tmp_path) -> None:
     observed = []
+    processes = []
     result = CommandRunner(tmp_path).stream_host(
-        ("printf", "one\\ntwo\\n"), observed.append
+        ("printf", "one\\ntwo\\n"), observed.append, on_start=processes.append
     )
     assert result.returncode == 0
     assert observed == ["one", "two"]
+    assert len(processes) == 1

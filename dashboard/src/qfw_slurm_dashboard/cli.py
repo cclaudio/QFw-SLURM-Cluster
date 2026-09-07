@@ -41,6 +41,9 @@ def parser() -> argparse.ArgumentParser:
     action.add_argument("--identity", choices=IDENTITIES, default="user-a")
     action.add_argument("--target", default="cluster")
     action.add_argument("--request-id", default="")
+    abort = commands.add_parser("abort")
+    abort.add_argument("operation_id")
+    abort.add_argument("--identity", choices=IDENTITIES, default="root")
     return value
 
 
@@ -53,9 +56,13 @@ def main(argv: list[str] | None = None) -> int:
         payload = service.diagnostic_state()
     elif args.command == "events":
         payload = service.events(args.cursor, args.limit, args.identity)
-    else:
+    elif args.command == "action":
         payload = service.submit_action(
             args.action, args.identity, args.target, args.request_id
+        ).payload()
+    else:
+        payload = service.abort_operation(
+            args.operation_id, args.identity
         ).payload()
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0

@@ -11,6 +11,12 @@ qfw-dashboard \- inspect and operate dashboard capabilities from a terminal
 .B action
 .I action
 .RI [ action-options ]
+.br
+.B qfw-dashboard
+.RI [ options ]
+.B abort
+.I operation-id
+.RB [ --identity " " root ]
 .SH DESCRIPTION
 Calls the same typed capabilities used by the QFw Slurm cluster dashboard.
 Output is JSON for CI and diagnostics. This command does not render or require
@@ -22,10 +28,27 @@ diagnostics record checks MUNGE, clocks, CPU topology, mounts, modules,
 directory publication, registration, DVM state, gateway connectivity, and
 credential readiness without returning credential data.
 .PP
-The action command accepts the allow-listed cluster lifecycle, service
-lifecycle, gateway recovery, node-drain, and node-resume actions exposed by the
-dashboard. Host and service mutations require
+The action command accepts the allow-listed cluster lifecycle, target-aware
+service lifecycle, node-drain, and node-resume actions exposed by the
+dashboard. Service actions use
+.BR service-start ,
+.BR service-stop ,
+.BR service-restart ,
+or
+.B service-recover
+with a target of
+.BR all ,
+.BR directory ,
+.BR nwqsim ,
+.BR iqm ,
+or
+.BR gateway .
+Host and service mutations require
 .BR "--identity root" .
+.PP
+The abort command terminates the process group for a queued or running
+administrative operation. It does not cancel a submitted Slurm experiment;
+use the dashboard experiment cancellation control for that lifecycle.
 .SH OPTIONS
 .TP
 .BI --cluster-root " path"
@@ -39,6 +62,12 @@ Run an action as root, user-a, user-b, or user-c.
 .TP
 .BI --request-id " id"
 Supply an idempotency identifier for an action.
+.SH EXAMPLES
+.nf
+qfw-dashboard action service-recover --target nwqsim --identity root
+qfw-dashboard abort 5c660fb8-4daf-4a50-a56c-b9f87eed24c8 \
+  --identity root
+.fi
 .SH SEE ALSO
 .BR qfw-dashboard-enable (8),
 .BR qfw-dashboard-service (8)

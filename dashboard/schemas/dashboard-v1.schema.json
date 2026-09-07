@@ -95,7 +95,11 @@
         "action": {"type": "string"},
         "identity": {"enum": ["root", "user-a", "user-b", "user-c"]},
         "target": {"type": "string"},
-        "status": {"enum": ["queued", "running", "succeeded", "failed"]},
+        "status": {
+          "enum": [
+            "queued", "running", "aborting", "aborted", "succeeded", "failed"
+          ]
+        },
         "return_code": {"type": ["integer", "null"]},
         "output": {"type": "array", "items": {"type": "string"}}
       }

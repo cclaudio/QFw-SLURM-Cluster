@@ -26,6 +26,13 @@ Shell pane in `slurmctld` as the identity selected when the shell was created.
 Regular users may also select a compute node allocated to one of their running
 jobs. Service-node shells require `root` and a second confirmation.
 
+The Operations area separates cluster, service, and node control. Each group
+provides an operation selector, **Run** and **Abort** controls, and live output.
+Service control selects `All services`, `Directory`, `NWQSim`, `IQM`, or
+`Gateway`; every request is routed through `qfw-site-services`. Select `root`
+before running or aborting an administrative operation. Run
+`man 8 qfw-site-services` for service target and dependency details.
+
 The experiment form discovers the installed QFw examples. Select normal or
 heterogeneous placement, then provide the Slurm partition, node and task counts,
 optional account or QoS, and the quantum request bounds. **Preview

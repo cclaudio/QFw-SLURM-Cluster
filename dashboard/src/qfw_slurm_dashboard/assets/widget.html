@@ -4,25 +4,116 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>QFw dashboard widget</title>
+  <link rel="stylesheet" href="/assets/service/css/qfw-slurm-cluster.css">
   <style>
-    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
-    body { background: #111827; color: #e5e7eb; margin: 0; padding: 1rem; }
-    header { align-items: center; display: flex; flex-wrap: wrap; gap: 1rem; }
-    h1 { font-size: 1.2rem; margin: 0; }
-    .context { font-size: 0.8rem; opacity: 0.8; }
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, sans-serif;
+      --bg: #07111f;
+      --panel: #091e30;
+      --cyan: #5ee8ff;
+      --teal: #2df4c3;
+      --text: #dff8ff;
+      --muted: #83a9bb;
+      --line: rgb(94 232 255 / 34%);
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      height: 100vh;
+      margin: 0;
+      overflow: hidden;
+    }
+    header, .qfw-widget-toolbar {
+      align-items: center;
+      background: linear-gradient(90deg, #0d2c43, #08182a);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      padding: 0.7rem 1rem;
+    }
+    header { justify-content: space-between; }
+    h1 { color: var(--cyan); font-size: 1.2rem; margin: 0; }
+    .context { color: var(--muted); font-size: 0.8rem; }
     .disconnected { color: #f87171; }
-    input { margin: 1rem 0; width: min(30rem, 90vw); }
-    pre { overflow: auto; white-space: pre-wrap; }
+    button, input {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--text);
+      font: inherit;
+      min-height: 2.4rem;
+      padding: 0.45rem 0.7rem;
+    }
+    input { width: min(30rem, 45vw); }
+    .qfw-widget-toolbar .qfw-camera-hint {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-left: auto;
+    }
+    .qfw-widget-zoom-label {
+      color: var(--muted);
+      min-width: 3.5rem;
+      text-align: center;
+    }
+    .qfw-widget-viewport {
+      background-color: var(--bg);
+      background-image: linear-gradient(rgb(94 232 255 / 4%) 1px, transparent 1px),
+        linear-gradient(90deg, rgb(94 232 255 / 4%) 1px, transparent 1px),
+        radial-gradient(circle at 48% 25%, rgb(43 118 156 / 18%), transparent 42%);
+      background-size: 2rem 2rem, 2rem 2rem, auto;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+      touch-action: none;
+    }
+    .qfw-widget-viewport.is-panning {
+      cursor: grabbing;
+      user-select: none;
+    }
+    .qfw-widget-mirror {
+      background: rgb(9 30 48 / 90%);
+      border: 1px solid var(--line);
+      left: 0;
+      max-width: none;
+      min-height: 12rem;
+      padding: 1rem;
+      position: absolute;
+      top: 0;
+      width: 72rem;
+    }
+    .qfw-widget-mirror[hidden] { display: none; }
+    .qfw-widget-mirror button,
+    .qfw-widget-mirror input,
+    .qfw-widget-mirror select {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--text);
+      font: inherit;
+      min-height: 2.4rem;
+      padding: 0.45rem 0.7rem;
+    }
   </style>
 </head>
-<body>
+<body class="qfw-widget-window">
   <header>
     <h1 id="label">QFw widget</h1>
     <span id="context" class="context">waiting for dashboard</span>
     <button id="collapse" type="button">Collapse</button>
   </header>
-  <label>Filter <input id="filter" type="search"></label>
-  <pre id="output">Waiting for the dashboard data source…</pre>
+  <div class="qfw-widget-toolbar">
+    <label>Filter <input id="filter" type="search"></label>
+    <span class="qfw-camera-hint">Wheel zoom · middle-drag pan</span>
+    <button id="zoomOut" type="button">−</button>
+    <output id="zoomLabel" class="qfw-widget-zoom-label">100%</output>
+    <button id="zoomIn" type="button">+</button>
+    <button id="resetView" type="button">Reset view</button>
+  </div>
+  <main id="viewport" class="qfw-widget-viewport" aria-label="Zoomable widget canvas">
+    <section id="output" class="qfw-widget-mirror">Waiting for the dashboard data source…</section>
+  </main>
   <script>
     const params = new URLSearchParams(window.location.search);
     const widget = params.get("widget") || "unknown";
@@ -32,36 +123,175 @@
     const label = document.getElementById("label");
     const context = document.getElementById("context");
     const output = document.getElementById("output");
+    const viewport = document.getElementById("viewport");
     const filter = document.getElementById("filter");
     const collapse = document.getElementById("collapse");
+    const zoomOut = document.getElementById("zoomOut");
+    const zoomIn = document.getElementById("zoomIn");
+    const resetView = document.getElementById("resetView");
+    const zoomLabel = document.getElementById("zoomLabel");
     let lastPayload = null;
+    let lastMarkup = "";
     let lastUpdate = 0;
+    let camera = { x: 24, y: 24, scale: 1 };
+    let pan = null;
 
-    function render() {
-      const query = filter.value.toLowerCase();
-      const formatted = JSON.stringify(lastPayload, null, 2);
-      output.textContent = !query
-        ? formatted
-        : formatted.split("\n").filter((line) => line.toLowerCase().includes(query)).join("\n");
-    }
-
-    filter.addEventListener("input", () => {
-      render();
+    function publishPresentation(presentation) {
       channel.postMessage({
         type: "presentation",
         widget,
         instance_id: instanceId,
-        presentation: { filter: filter.value },
+        presentation,
       });
+    }
+
+    function applyCamera() {
+      output.style.left = `${camera.x / camera.scale}px`;
+      output.style.top = `${camera.y / camera.scale}px`;
+      output.style.zoom = String(camera.scale);
+      zoomLabel.textContent = `${Math.round(camera.scale * 100)}%`;
+    }
+
+    function persistCamera() {
+      publishPresentation({ popout_camera: { ...camera } });
+    }
+
+    function zoomAt(clientX, clientY, factor) {
+      const bounds = viewport.getBoundingClientRect();
+      const localX = clientX - bounds.left;
+      const localY = clientY - bounds.top;
+      const previous = camera.scale;
+      const next = Math.min(2.25, Math.max(0.35, previous * factor));
+      const worldX = (localX - camera.x) / previous;
+      const worldY = (localY - camera.y) / previous;
+      camera = {
+        scale: next,
+        x: localX - worldX * next,
+        y: localY - worldY * next,
+      };
+      applyCamera();
+      persistCamera();
+    }
+
+    viewport.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.0015));
+    }, { passive: false });
+    viewport.addEventListener("pointerdown", (event) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      pan = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      viewport.setPointerCapture(event.pointerId);
+      viewport.classList.add("is-panning");
+    });
+    viewport.addEventListener("pointermove", (event) => {
+      if (!pan || pan.pointerId !== event.pointerId) return;
+      camera.x += event.clientX - pan.x;
+      camera.y += event.clientY - pan.y;
+      pan.x = event.clientX;
+      pan.y = event.clientY;
+      applyCamera();
+    });
+    function finishPan(event) {
+      if (!pan || pan.pointerId !== event.pointerId) return;
+      pan = null;
+      viewport.classList.remove("is-panning");
+      persistCamera();
+    }
+    viewport.addEventListener("pointerup", finishPan);
+    viewport.addEventListener("pointercancel", finishPan);
+    viewport.addEventListener("auxclick", (event) => {
+      if (event.button === 1) event.preventDefault();
+    });
+    zoomOut.addEventListener("click", () => {
+      const bounds = viewport.getBoundingClientRect();
+      zoomAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, 0.85);
+    });
+    zoomIn.addEventListener("click", () => {
+      const bounds = viewport.getBoundingClientRect();
+      zoomAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, 1 / 0.85);
+    });
+    resetView.addEventListener("click", () => {
+      camera = { x: 24, y: 24, scale: 1 };
+      applyCamera();
+      persistCamera();
+    });
+
+    function hydrateWidget() {
+      if (widget !== "topology") return;
+      const projection = output.querySelector(".qfw-topology-projection");
+      const topologyFilter = output.querySelector(".qfw-topology-filter");
+      const zoom = output.querySelector(".qfw-topology-zoom");
+      const graph = output.querySelector(".qfw-topology-graph");
+      projection?.addEventListener("change", () => {
+        publishPresentation({ projection: projection.value });
+      });
+      topologyFilter?.addEventListener("input", () => {
+        publishPresentation({ filter: topologyFilter.value });
+      });
+      zoom?.addEventListener("input", () => {
+        if (graph) graph.style.width = `${zoom.value}%`;
+      });
+      zoom?.addEventListener("change", () => {
+        publishPresentation({ zoom: Number(zoom.value) });
+      });
+      output.querySelectorAll(".qfw-topology-graph [data-object-id]")
+        .forEach((object) => {
+          const select = () => publishPresentation({
+            selected: object.dataset.objectId,
+          });
+          object.addEventListener("click", select);
+          object.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") select();
+          });
+        });
+    }
+
+    function captureMirrorScrollPositions() {
+      return [...output.querySelectorAll(
+        ".qfw-topology, .qfw-table-wrap, .qfw-alert-detail",
+      )]
+        .map((container) => ({
+          left: container.scrollLeft,
+          top: container.scrollTop,
+        }));
+    }
+
+    function restoreMirrorScrollPositions(positions) {
+      const containers = output.querySelectorAll(
+        ".qfw-topology, .qfw-table-wrap, .qfw-alert-detail",
+      );
+      positions.forEach((position, index) => {
+        if (!containers[index]) return;
+        containers[index].scrollLeft = position.left;
+        containers[index].scrollTop = position.top;
+      });
+    }
+
+    function render() {
+      if (!lastMarkup) {
+        output.textContent = lastPayload === null
+          ? "Waiting for the dashboard data source…"
+          : "The dashboard did not provide a rendered widget.";
+        return;
+      }
+      const scrollPositions = captureMirrorScrollPositions();
+      const template = document.createElement("template");
+      template.innerHTML = lastMarkup;
+      output.replaceChildren(template.content.cloneNode(true));
+      hydrateWidget();
+      restoreMirrorScrollPositions(scrollPositions);
+    }
+
+    filter.addEventListener("input", () => {
+      render();
+      publishPresentation({ filter: filter.value });
     });
     collapse.addEventListener("click", () => {
       const expanded = output.hidden;
       output.hidden = !expanded;
       collapse.textContent = expanded ? "Collapse" : "Expand";
-      channel.postMessage({
-        type: "presentation", widget, instance_id: instanceId,
-        presentation: { expanded },
-      });
+      publishPresentation({ expanded });
     });
     channel.addEventListener("message", (event) => {
       const message = event.data || {};
@@ -76,7 +306,17 @@
         output.hidden = !message.presentation.expanded;
         collapse.textContent = message.presentation.expanded ? "Collapse" : "Expand";
       }
+      const savedCamera = message.presentation?.popout_camera;
+      if (savedCamera && !pan) {
+        camera = {
+          x: Number(savedCamera.x) || 0,
+          y: Number(savedCamera.y) || 0,
+          scale: Math.min(2.25, Math.max(0.35, Number(savedCamera.scale) || 1)),
+        };
+        applyCamera();
+      }
       lastPayload = message.payload;
+      lastMarkup = message.markup || "";
       lastUpdate = Date.now();
       render();
     });
@@ -86,10 +326,10 @@
       context.textContent = "Dashboard disconnected; attempting to reconnect";
       channel.postMessage({ type: "request", widget, instance_id: instanceId });
     }, 2500);
+    applyCamera();
     channel.postMessage({ type: "request", widget, instance_id: instanceId });
-    window.addEventListener("focus", () => channel.postMessage({
-      type: "presentation", widget, instance_id: instanceId,
-      presentation: { focused: "external" },
+    window.addEventListener("focus", () => publishPresentation({
+      focused: "external",
     }));
     window.addEventListener("pagehide", () => channel.close(), { once: true });
   </script>

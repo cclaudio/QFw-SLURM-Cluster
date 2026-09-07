@@ -31,6 +31,7 @@ policy.
 | `GET /api/qfw-dashboard/artifact` | Identity-checked experiment artifact | No |
 | `GET /qfw-dashboard/widget` | Same-origin widget window | No |
 | `POST /api/qfw-dashboard/operations` | Allow-listed lifecycle action | Yes |
+| `POST /api/qfw-dashboard/operations/abort` | Abort a running operation | Yes |
 | `POST /api/qfw-dashboard/preview` | Allocation command preview | No |
 | `POST /api/qfw-dashboard/experiments` | Slurm experiment submission | Yes |
 | `POST /api/qfw-dashboard/experiments/cancel` | Slurm cancellation | Yes |
@@ -92,8 +93,8 @@ source presents the manager's authoritative service-plane lifecycle record.
 
 ## Recovery boundary
 
-The directory manager cannot be stopped or restarted while a managed QPM is
-ready. Complete service shutdown remains ordered by `qfw-site-services`.
-Individual NWQSim and IQM restart actions use `qfw-qpm-svc`, and gateway
-recovery restarts the supervised gateway process. Recovery never deletes PID,
-readiness, URI, or journal files directly.
+All service lifecycle requests use `qfw-site-services` with an explicit target.
+That manager owns dependency checks, aggregate ordering, remote placement, and
+gateway supervision. The dashboard does not invoke lower-level QFw managers or
+kill service processes directly. Recovery never deletes PID, readiness, URI,
+or journal files directly.

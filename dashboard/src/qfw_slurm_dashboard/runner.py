@@ -85,7 +85,11 @@ class CommandRunner:
         )
 
     def stream_host(
-        self, argv: Sequence[str], on_line: Callable[[str], None]
+        self,
+        argv: Sequence[str],
+        on_line: Callable[[str], None],
+        *,
+        on_start: Callable[[subprocess.Popen[str]], None] | None = None,
     ) -> CommandResult:
         process = subprocess.Popen(
             list(argv),
@@ -94,7 +98,10 @@ class CommandRunner:
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=os.environ.copy(),
+            start_new_session=True,
         )
+        if on_start is not None:
+            on_start(process)
         output: list[str] = []
         assert process.stdout is not None
         for line in process.stdout:

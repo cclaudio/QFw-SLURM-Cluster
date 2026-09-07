@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import base64
+import os
 import re
+import signal
 import shlex
+import subprocess
 import threading
 import time
 import uuid
@@ -16,7 +19,6 @@ from .collectors import (
     collect_all,
     diagnostics,
     inventory_status,
-    service_plane_status,
 )
 from .models import Experiment, Operation, aggregate_state, utc_now
 from .logs import LogSource, SOURCES, read_source
@@ -49,12 +51,6 @@ EXAMPLE_SCRIPTS = {
 
 
 class DashboardService:
-    _ACTIVATE = (
-        "export QFW_SHARED_ROOT=/workspace/qfw-container-base; "
-        "export QFW_SITE_CONFIG=/etc/openqse/qfw/site.yaml; "
-        "source /opt/openqse/qfw/bin/qfw-activate "
-        "--venv /opt/openqse/qfw-venv >/dev/null; "
-    )
     HOST_ACTIONS = {
         "cluster-build": ("./do_build.sh",),
         "cluster-start": ("./do_startup.sh",),
@@ -65,95 +61,17 @@ class DashboardService:
             "./do_stop.sh delete && ./do_build.sh && ./do_startup.sh",
         ),
     }
-    SERVICE_ACTIONS: dict[str, tuple[tuple[str, ...], str]] = {
-        "services-start": (("qfw-site-services", "start"), "slurmctld"),
-        "services-stop": (("qfw-site-services", "stop"), "slurmctld"),
-        "services-restart": ((
-            "bash", "-lc",
-            "qfw-site-services stop; qfw-site-services start",
-        ), "slurmctld"),
-        "services-status": (("qfw-site-services", "status"), "slurmctld"),
-        "directory-start": ((
-            "bash", "-lc", _ACTIVATE
-            + "qfw-dir-svc start --scope site "
-            "--run-dir /var/lib/qfw-site-services/directory "
-            "--site-config /etc/openqse/qfw/site.yaml --timeout 300",
-        ), "slurmctld"),
-        "directory-stop": ((
-            "bash", "-lc", _ACTIVATE
-            + "qfw-dir-svc stop "
-            "--run-dir /var/lib/qfw-site-services/directory",
-        ), "slurmctld"),
-        "directory-restart": ((
-            "bash", "-lc", _ACTIVATE
-            + "qfw-dir-svc stop "
-            "--run-dir /var/lib/qfw-site-services/directory; "
-            "qfw-dir-svc start --scope site "
-            "--run-dir /var/lib/qfw-site-services/directory "
-            "--site-config /etc/openqse/qfw/site.yaml --timeout 300",
-        ), "slurmctld"),
-        "nwqsim-start": ((
-            "bash", "-lc", _ACTIVATE
-            + "export QFW_SIMULATOR_NODES="
-            "nwqsim-head,nwqsim-worker-1,nwqsim-worker-2; "
-            "qfw-qpm-svc start --scope site "
-            "--run-dir /var/lib/qfw-site-services/qpm/nwqsim "
-            "--site-config /etc/openqse/qfw/site.yaml "
-            "--service-id nwqsim --timeout 300",
-        ), "nwqsim-head"),
-        "nwqsim-stop": ((
-            "bash", "-lc", _ACTIVATE
-            + "qfw-qpm-svc stop "
-            "--run-dir /var/lib/qfw-site-services/qpm/nwqsim",
-        ), "nwqsim-head"),
-        "nwqsim-restart": ((
-            "bash", "-lc", _ACTIVATE
-            + "qfw-qpm-svc stop "
-            "--run-dir /var/lib/qfw-site-services/qpm/nwqsim; "
-            "export QFW_SIMULATOR_NODES="
-            "nwqsim-head,nwqsim-worker-1,nwqsim-worker-2; "
-            "qfw-qpm-svc start --scope site "
-            "--run-dir /var/lib/qfw-site-services/qpm/nwqsim "
-            "--site-config /etc/openqse/qfw/site.yaml "
-            "--service-id nwqsim --timeout 300",
-        ), "nwqsim-head"),
-        "iqm-start": ((
-            "bash", "-lc", _ACTIVATE
-            + "qfw-qpm-svc start --scope site "
-            "--run-dir /var/lib/qfw-site-services/qpm/iqm-ornl-20q "
-            "--site-config /etc/openqse/qfw/site.yaml "
-            "--service-id iqm-ornl-20q --timeout 300",
-        ), "iqm-head"),
-        "iqm-stop": ((
-            "bash", "-lc", _ACTIVATE
-            + "qfw-qpm-svc stop "
-            "--run-dir /var/lib/qfw-site-services/qpm/iqm-ornl-20q",
-        ), "iqm-head"),
-        "iqm-restart": ((
-            "bash", "-lc", _ACTIVATE
-            + "qfw-qpm-svc stop "
-            "--run-dir /var/lib/qfw-site-services/qpm/iqm-ornl-20q; "
-            "qfw-qpm-svc start --scope site "
-            "--run-dir /var/lib/qfw-site-services/qpm/iqm-ornl-20q "
-            "--site-config /etc/openqse/qfw/site.yaml "
-            "--service-id iqm-ornl-20q --timeout 300",
-        ), "iqm-head"),
-        "gateway-restart": ((
-            "bash", "-lc",
-            "pid=$(pgrep -f '^/opt/openqse/qfw/bin/defwp -m "
-            "qfw_slurm_gateway ' | head -n 1); "
-            "test -n \"${pid}\"; kill -KILL \"${pid}\"; "
-            "for i in $(seq 1 60); do "
-            "timeout 1 bash -c '</dev/tcp/slurmctld/18095' && exit 0; "
-            "sleep 1; done; exit 1",
-        ), "slurmctld"),
-    }
+    SERVICE_TARGETS = {"all", "directory", "nwqsim", "iqm", "gateway"}
+    SERVICE_OPERATIONS = {"start", "stop", "restart", "recover", "status"}
 
     def __init__(self, cluster_root: Path, state_root: Path) -> None:
         self.cluster_root = cluster_root.resolve()
         self.runner = CommandRunner(self.cluster_root)
         self.store = DashboardStore(state_root / "qfw-slurm-cluster")
         self._threads: dict[str, threading.Thread] = {}
+        self._processes: dict[str, subprocess.Popen[str]] = {}
+        self._cancelled: set[str] = set()
+        self._operation_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._state_cache: dict[str, Any] | None = None
         self._state_cached_at = 0.0
@@ -416,22 +334,18 @@ class DashboardService:
                 raise PermissionError("host cluster actions require root selection")
             argv = self.HOST_ACTIONS[action]
             container = None
-        elif action in self.SERVICE_ACTIONS:
+        elif action.startswith("service-"):
             if identity != "root":
                 raise PermissionError("service actions require root selection")
-            if action in {"directory-stop", "directory-restart"}:
-                plane = service_plane_status(self.runner)
-                active = [
-                    str(item.get("component")) for item in plane.records
-                    if item.get("component") in {"nwqsim", "iqm"}
-                    and item.get("state") == "ready"
-                ]
-                if active:
-                    raise RuntimeError(
-                        "stop managed QPMs before changing the directory service: "
-                        + ", ".join(active)
-                    )
-            argv, container = self.SERVICE_ACTIONS[action]
+            service_operation = action.removeprefix("service-")
+            if service_operation not in self.SERVICE_OPERATIONS:
+                raise ValueError(f"unsupported service operation: {service_operation}")
+            if target not in self.SERVICE_TARGETS:
+                raise ValueError(f"unsupported service target: {target}")
+            argv = (
+                "qfw-site-services", service_operation, "--target", target,
+            )
+            container = "slurmctld"
         elif action in {"node-drain", "node-resume"}:
             if identity != "root" or not _SAFE_NAME.fullmatch(target):
                 raise PermissionError("valid node and root selection required")
@@ -493,6 +407,13 @@ class DashboardService:
             command = argv if container is None else self.runner.cluster_argv(
                 operation.identity, argv, container=container
             )
+            def on_start(process: subprocess.Popen[str]) -> None:
+                with self._operation_lock:
+                    self._processes[operation.operation_id] = process
+                    cancelled = operation.operation_id in self._cancelled
+                if cancelled:
+                    self._terminate_process(process)
+
             def on_line(line: str) -> None:
                 operation.output.append(line)
                 self.store.save_operation(operation)
@@ -505,13 +426,24 @@ class DashboardService:
                     "operation_id": operation.operation_id,
                     "message": line,
                 })
-            result = self.runner.stream_host(command, on_line)
+            result = self.runner.stream_host(command, on_line, on_start=on_start)
             operation.return_code = result.returncode
-            operation.status = "succeeded" if result.returncode == 0 else "failed"
+            with self._operation_lock:
+                cancelled = operation.operation_id in self._cancelled
+            operation.status = (
+                "aborted" if cancelled else
+                "succeeded" if result.returncode == 0 else "failed"
+            )
         except Exception as error:
             operation.output = [str(error)]
             operation.return_code = 1
-            operation.status = "failed"
+            with self._operation_lock:
+                cancelled = operation.operation_id in self._cancelled
+            operation.status = "aborted" if cancelled else "failed"
+        finally:
+            with self._operation_lock:
+                self._processes.pop(operation.operation_id, None)
+                self._cancelled.discard(operation.operation_id)
         operation.completed_at = utc_now()
         self.store.save_operation(operation)
         if operation.return_code:
@@ -535,6 +467,48 @@ class DashboardService:
             "completed_at": operation.completed_at,
             "outcome": operation.status,
         })
+
+    @staticmethod
+    def _terminate_process(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            return
+
+    def abort_operation(self, operation_id: str, identity: str) -> Operation:
+        if identity != "root":
+            raise PermissionError("operation abort requires root selection")
+        stored = next((
+            item for item in self.store.operations()
+            if item.get("operation_id") == operation_id
+        ), None)
+        if stored is None:
+            raise KeyError(f"unknown operation: {operation_id}")
+        operation = Operation(**{
+            key: value for key, value in stored.items()
+            if key in Operation.__dataclass_fields__
+        })
+        if operation.status not in {"queued", "running", "aborting"}:
+            raise RuntimeError(f"operation is already {operation.status}")
+        operation.status = "aborting"
+        operation.output.append("Abort requested by root")
+        self.store.save_operation(operation)
+        with self._operation_lock:
+            self._cancelled.add(operation_id)
+            process = self._processes.get(operation_id)
+        if process is not None:
+            self._terminate_process(process)
+        self.store.audit({
+            "identity": identity,
+            "host_identity": "electroboy-service",
+            "action": "operation-abort",
+            "target": operation.target,
+            "operation_id": operation_id,
+            "outcome": "requested",
+        })
+        return operation
 
     def submit_experiment(self, request: dict[str, Any]) -> Experiment:
         identity = str(request.get("identity", ""))

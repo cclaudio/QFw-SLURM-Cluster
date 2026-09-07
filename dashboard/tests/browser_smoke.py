@@ -69,6 +69,11 @@ def main() -> int:
             ">Progress</option>",
             ">File</option>",
             ">Shell</option>",
+            'class="qfw-canvas-viewport"',
+            'class="qfw-widget-chevron"',
+            ">Cluster control<",
+            ">Service control<",
+            ">Node control<",
         )
         missing = [value for value in required if value not in html]
         forbidden = (
@@ -80,8 +85,8 @@ def main() -> int:
         present = [value for value in forbidden if value in html]
         widgets = tuple(
             f'data-widget="{name}"' for name in (
-                "health", "nodes", "services", "allocations", "experiments",
-                "topology", "results", "alerts",
+                "health", "inventory", "nodes", "services", "allocations",
+                "experiments", "topology", "results", "alerts",
             )
         )
         missing_widgets = [value for value in widgets if value not in html]

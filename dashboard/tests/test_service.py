@@ -5,7 +5,7 @@ import pytest
 
 from qfw_slurm_dashboard.runner import CommandResult
 from qfw_slurm_dashboard.service import DashboardService
-from qfw_slurm_dashboard.models import SourceState, utc_now
+from qfw_slurm_dashboard.models import Operation
 
 
 class ImmediateThread:
@@ -120,24 +120,32 @@ def test_individual_qpm_action_runs_on_service_node(tmp_path) -> None:
     with patch("qfw_slurm_dashboard.service.threading.Thread", ImmediateThread):
         with patch.object(dashboard.runner, "stream_host") as host:
             host.return_value = CommandResult(("docker",), 0, "ready", "")
-            operation = dashboard.submit_action("nwqsim-start", "root")
+            operation = dashboard.submit_action(
+                "service-start", "root", target="nwqsim"
+            )
     argv = host.call_args.args[0]
-    assert "nwqsim-head" in argv
-    assert "qfw-qpm-svc start" in argv[-1]
+    assert "slurmctld" in argv
+    assert "qfw-site-services start --target nwqsim" in argv[-1]
     assert operation.status == "succeeded"
 
 
-def test_directory_stop_rejects_active_qpm_dependencies(tmp_path) -> None:
+def test_service_action_rejects_unknown_target(tmp_path) -> None:
     dashboard = service(tmp_path)
-    plane = SourceState("service-plane", "ready", utc_now(), [
-        {"component": "nwqsim", "state": "ready"},
-        {"component": "iqm", "state": "ready"},
-    ])
-    with patch(
-        "qfw_slurm_dashboard.service.service_plane_status", return_value=plane
-    ):
-        with pytest.raises(RuntimeError, match="stop managed QPMs"):
-            dashboard.submit_action("directory-stop", "root")
+    with pytest.raises(ValueError, match="unsupported service target"):
+        dashboard.submit_action("service-stop", "root", target="other")
+
+
+def test_operation_abort_terminates_running_process_group(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    operation = Operation("op", "service-start", "root", "all", status="running")
+    dashboard.store.save_operation(operation)
+    process = type("Process", (), {"pid": 42, "poll": lambda self: None})()
+    dashboard._processes[operation.operation_id] = process
+    with patch("qfw_slurm_dashboard.service.os.getpgid", return_value=84):
+        with patch("qfw_slurm_dashboard.service.os.killpg") as killpg:
+            result = dashboard.abort_operation(operation.operation_id, "root")
+    killpg.assert_called_once()
+    assert result.status == "aborting"
 
 
 def test_regular_shell_target_must_be_allocated(tmp_path) -> None:
