@@ -1,8 +1,8 @@
 # Start All Site-owned QFw Services
 
 This is the canonical administrator workflow. It starts the directory service
-on `slurmctld`, a three-node NWQSim DVM and QPMd, and the IQM QPMd. The QPMd
-service nodes remain outside application allocations.
+on `slurmctld`, a three-node NWQSim DVM and QPMd, the IQM QPMd, and the QFw
+Slurm gateway. The QPMd service nodes remain outside application allocations.
 
 ## Prerequisites
 
@@ -33,8 +33,8 @@ qfw-site-services status
 ```
 
 Run `man 8 qfw-site-services` for command details. Startup is dependency
-ordered and failure-safe. If a QPM fails to start, the command removes only
-components started by that invocation.
+ordered and failure-safe: directory, NWQSim, IQM, then gateway. If a component
+fails to start, the command removes only components started by that invocation.
 
 ## Verify
 
@@ -60,5 +60,6 @@ DVM.
 qfw-site-services stop
 ```
 
-The stop action removes the IQM QPM, NWQSim QPM and DVM, and directory service
-in dependency order. It does not stop the Slurm cluster.
+The stop action first closes the gateway to new reservations, then removes the
+IQM QPM, NWQSim QPM and DVM, and directory service. It does not stop the Slurm
+cluster.

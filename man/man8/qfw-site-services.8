@@ -9,7 +9,7 @@ qfw-site-services \- manage the virtual cluster QFw service plane
 .SH DESCRIPTION
 .B qfw-site-services
 starts and stops the administrator-owned site directory, NWQSim DVM and QPM,
-and IQM QPM used by the QFw virtual Slurm cluster.
+IQM QPM, and QFw Slurm gateway used by the virtual cluster.
 The command runs on
 .B slurmctld
 as root and invokes the installed QFw service managers on their assigned
@@ -19,18 +19,18 @@ service nodes.
 .B start
 Start the selected target.  The default
 .B all
-target starts the directory service, NWQSim service, and IQM service in
-dependency order.  Partial aggregate startup failure removes only components
-created by that invocation.  Starting a QPM target requires a ready directory
-service.
+target starts the directory service, NWQSim service, IQM service, and gateway
+in dependency order.  Partial aggregate startup failure removes only
+components created by that invocation.  Starting a QPM or gateway target
+requires a ready directory service.
 .TP
 .B status
 Report the state of each service manager and the gateway endpoint.
 .TP
 .B stop
-Stop the selected target.  The default aggregate action stops the IQM QPM,
-NWQSim QPM and DVM, then the directory service.  A targeted directory stop is
-rejected while a managed QPM remains ready.
+Stop the selected target.  The default aggregate action stops the gateway,
+IQM QPM, NWQSim QPM and DVM, then the directory service.  A targeted directory
+stop is rejected while the gateway or a managed QPM remains ready.
 .TP
 .B restart
 Stop and then start the selected target.  A stop failure prevents startup.
@@ -46,7 +46,9 @@ Select
 .BR directory ,
 .BR nwqsim ,
 or
-.BR iqm .
+.BR iqm ,
+or
+.BR gateway .
 The default is
 .BR all .
 .TP
@@ -65,6 +67,9 @@ The command accepts administrator overrides through
 .BR QFW_SIMULATOR_NODES ,
 .BR QFW_GATEWAY_HOST ,
 .BR QFW_GATEWAY_PORT ,
+.BR QFW_GATEWAY_CONFIG ,
+.BR QFW_GATEWAY_USER ,
+.BR QFW_GATEWAY_LOG_DIR ,
 and
 .BR QFW_SITE_START_TIMEOUT .
 .SH FILES
@@ -74,10 +79,17 @@ Default QFw site configuration.
 .TP
 .I /var/lib/qfw-site-services
 Default administrator-owned manager state root on each service host.
+.TP
+.I /var/lib/qfw-site-services/gateway/supervisor.pid
+Default gateway-supervisor PID record.
+.TP
+.I /var/log/qfw-slurm-gateway/gateway.log
+Default gateway-supervisor and process log.
 .SH EXAMPLES
 .nf
 qfw-site-services start
 qfw-site-services status --target nwqsim
+qfw-site-services restart --target gateway
 qfw-site-services recover --target iqm
 qfw-site-services stop --target all
 .fi

@@ -30,6 +30,7 @@ managed target from `slurmctld` with:
 qfw-site-services status --target directory
 qfw-site-services status --target nwqsim
 qfw-site-services status --target iqm
+qfw-site-services status --target gateway
 ```
 
 The site manager performs remote-node placement. Administrators do not invoke
@@ -73,6 +74,7 @@ run directory:
 /var/lib/qfw-site-services/directory/services/qfw-site-dirsvc/logs
 /var/lib/qfw-site-services/qpm/nwqsim/services/nwqsim/logs
 /var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/iqm-ornl-20q/logs
+/var/log/qfw-slurm-gateway/gateway.log
 ```
 
 For a pending job, inspect `scontrol show job <job-id>` and the gateway log at

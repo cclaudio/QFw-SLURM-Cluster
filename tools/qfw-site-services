@@ -13,11 +13,17 @@ QFW_IQM_NODE="${QFW_IQM_NODE:-iqm-head}"
 QFW_SIMULATOR_NODES="${QFW_SIMULATOR_NODES:-nwqsim-head,nwqsim-worker-1,nwqsim-worker-2}"
 QFW_GATEWAY_HOST="${QFW_GATEWAY_HOST:-slurmctld}"
 QFW_GATEWAY_PORT="${QFW_GATEWAY_PORT:-18095}"
+QFW_GATEWAY_CONFIG="${QFW_GATEWAY_CONFIG:-/etc/qfw-slurm/gateway.yaml}"
+QFW_GATEWAY_USER="${QFW_GATEWAY_USER:-qfw-slurm}"
+QFW_GATEWAY_LOG_DIR="${QFW_GATEWAY_LOG_DIR:-/var/log/qfw-slurm-gateway}"
 QFW_SITE_START_TIMEOUT="${QFW_SITE_START_TIMEOUT:-300}"
 
 directory_run_dir="${QFW_SITE_RUN_ROOT}/directory"
 nwqsim_run_dir="${QFW_SITE_RUN_ROOT}/qpm/nwqsim"
 iqm_run_dir="${QFW_SITE_RUN_ROOT}/qpm/iqm-ornl-20q"
+gateway_run_dir="${QFW_SITE_RUN_ROOT}/gateway"
+gateway_pid_file="${gateway_run_dir}/supervisor.pid"
+gateway_log_file="${QFW_GATEWAY_LOG_DIR}/gateway.log"
 dry_run=false
 target=all
 
@@ -36,7 +42,7 @@ Actions:
 
 Options:
   --target TARGET
-             Select all, directory, nwqsim, or iqm (default: all)
+             Select all, directory, nwqsim, iqm, or gateway (default: all)
   --dry-run  Print the commands without executing them
 EOF
 }
@@ -89,6 +95,164 @@ exit "${status}"
 EOF
 }
 
+gateway_supervisor() {
+	local child_pid=""
+	local status=0
+
+	stop_child() {
+		trap - TERM INT
+		if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+			kill -TERM "${child_pid}" 2>/dev/null || true
+			wait "${child_pid}" 2>/dev/null || true
+		fi
+		exit 0
+	}
+	trap stop_child TERM INT
+
+	while true; do
+		(
+			export QFW_SHARED_ROOT
+			source "${QFW_INSTALL_PREFIX}/bin/qfw-activate" \
+				--venv "${QFW_VENV}"
+			exec qfw-slurm-gateway-launch \
+				--config "${QFW_GATEWAY_CONFIG}" serve
+		) &
+		child_pid=$!
+		wait "${child_pid}"
+		status=$?
+		child_pid=""
+		printf 'qfw-slurm-gateway exited with status %s; retrying\n' \
+			"${status}" >&2
+		sleep 2
+	done
+}
+
+run_gateway() {
+	local gateway_action="$1"
+	if ${dry_run}; then
+		echo "${QFW_GATEWAY_HOST}: qfw gateway ${gateway_action}"
+		return 0
+	fi
+
+	ssh -o BatchMode=yes -o ConnectTimeout=10 \
+		"root@${QFW_GATEWAY_HOST}" \
+		/bin/bash -s -- \
+		"${gateway_action}" \
+		"${QFW_SITE_RUN_ROOT}" \
+		"${gateway_pid_file}" \
+		"${gateway_log_file}" \
+		"${QFW_GATEWAY_LOG_DIR}" \
+		"${QFW_GATEWAY_USER}" \
+		"${QFW_INSTALL_PREFIX}" \
+		"${QFW_VENV}" \
+		"${QFW_SHARED_ROOT}" \
+		"${QFW_GATEWAY_CONFIG}" \
+		"${QFW_GATEWAY_HOST}" \
+		"${QFW_GATEWAY_PORT}" <<'EOF'
+set -uo pipefail
+
+action="$1"
+run_root="$2"
+pid_file="$3"
+log_file="$4"
+log_dir="$5"
+gateway_user="$6"
+qfw_prefix="$7"
+qfw_venv="$8"
+qfw_shared_root="$9"
+shift 9
+gateway_config="$1"
+gateway_host="$2"
+gateway_port="$3"
+
+running() {
+	local pid=""
+	[[ -r "${pid_file}" ]] || return 1
+	read -r pid <"${pid_file}"
+	[[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+	kill -0 "${pid}" 2>/dev/null || return 1
+	tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null |
+		grep -q 'qfw-site-services __gateway-supervisor'
+}
+
+case "${action}" in
+start)
+	if running; then
+		echo "QFw Slurm gateway supervisor is already running"
+		exit 0
+	fi
+	install -d -m 0755 "${run_root}"
+	install -d -m 0755 "$(dirname "${pid_file}")"
+	install -d -o "${gateway_user}" -g "${gateway_user}" -m 0750 \
+		"${log_dir}"
+	install -d -o "${gateway_user}" -g "${gateway_user}" -m 0700 \
+		/var/lib/qfw-slurm-gateway
+	rm -f "${pid_file}"
+	setsid gosu "${gateway_user}" env \
+		HOME=/var/lib/qfw-slurm-gateway \
+		USER="${gateway_user}" \
+		LOGNAME="${gateway_user}" \
+		QFW_INSTALL_PREFIX="${qfw_prefix}" \
+		QFW_VENV="${qfw_venv}" \
+		QFW_SHARED_ROOT="${qfw_shared_root}" \
+		QFW_GATEWAY_CONFIG="${gateway_config}" \
+		/usr/local/sbin/qfw-site-services __gateway-supervisor \
+		>>"${log_file}" 2>&1 </dev/null &
+	pid=$!
+	echo "${pid}" >"${pid_file}"
+	sleep 1
+	if ! running; then
+		echo "qfw-site-services: gateway supervisor exited during startup" >&2
+		exit 1
+	fi
+	echo "QFw Slurm gateway supervisor started with PID ${pid}"
+	;;
+status)
+	if ! running; then
+		echo "not-ready"
+		exit 1
+	fi
+	if ! python3 - "${gateway_host}" "${gateway_port}" <<'PY'
+import socket
+import sys
+with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5):
+    pass
+PY
+	then
+		echo "supervisor-running endpoint-not-ready"
+		exit 1
+	fi
+	echo "ready"
+	;;
+stop)
+	if ! running; then
+		rm -f "${pid_file}"
+		echo "QFw Slurm gateway supervisor is stopped"
+		exit 0
+	fi
+	read -r pid <"${pid_file}"
+	kill -TERM -- "-${pid}"
+	for _ in $(seq 1 50); do
+		if ! running; then
+			rm -f "${pid_file}"
+			echo "QFw Slurm gateway supervisor stopped"
+			exit 0
+		fi
+		sleep 0.1
+	done
+	kill -KILL -- "-${pid}" 2>/dev/null || true
+	rm -f "${pid_file}"
+	echo "qfw-site-services: gateway supervisor did not stop" >&2
+	exit 1
+	;;
+*)
+	echo "qfw-site-services: invalid internal gateway action" >&2
+	exit 2
+	;;
+esac
+EOF
+}
+
 gateway_ready() {
 	if ${dry_run}; then
 		echo "${QFW_GATEWAY_HOST}: test TCP ${QFW_GATEWAY_PORT}"
@@ -132,6 +296,23 @@ stop_iqm() {
 		--run-dir "${iqm_run_dir}"
 }
 
+start_gateway() {
+	require_directory || return 1
+	run_gateway start || return 1
+	if ! wait_for_gateway; then
+		echo "qfw-site-services: gateway did not become ready" >&2
+		return 1
+	fi
+}
+
+stop_gateway() {
+	run_gateway stop
+}
+
+gateway_managed_ready() {
+	run_gateway status
+}
+
 directory_ready() {
 	run_qfw "${QFW_DIR_NODE}" qfw-dir-svc status \
 		--run-dir "${directory_run_dir}"
@@ -166,6 +347,9 @@ require_directory_dependents_stopped() {
 	fi
 	if iqm_ready >/dev/null 2>&1; then
 		active+=(iqm)
+	fi
+	if gateway_managed_ready >/dev/null 2>&1; then
+		active+=(gateway)
 	fi
 	if (( ${#active[@]} == 0 )); then
 		return 0
@@ -229,14 +413,12 @@ start_services() {
 	fi
 	iqm_started=true
 
-	if ! wait_for_gateway; then
-		echo "qfw-site-services: gateway did not become ready" >&2
+	if ! start_gateway; then
 		${iqm_started} && stop_iqm >/dev/null 2>&1 || true
 		${nwqsim_started} && stop_nwqsim >/dev/null 2>&1 || true
 		${directory_started} && stop_directory >/dev/null 2>&1 || true
 		return 1
 	fi
-
 	echo "QFw site services are ready."
 }
 
@@ -253,18 +435,14 @@ service_status() {
 	run_qfw "${QFW_IQM_NODE}" qfw-qpm-svc status \
 		--run-dir "${iqm_run_dir}" || status=1
 	echo "QFw Slurm gateway (${QFW_GATEWAY_HOST}:${QFW_GATEWAY_PORT})"
-	if gateway_ready; then
-		echo "ready"
-	else
-		echo "not-ready"
-		status=1
-	fi
+	gateway_managed_ready || status=1
 	return "${status}"
 }
 
 stop_services() {
 	local status=0
 
+	stop_gateway || status=1
 	stop_iqm || status=1
 	stop_nwqsim || status=1
 	stop_directory || status=1
@@ -288,6 +466,10 @@ target_status() {
 		echo "IQM QPM (${QFW_IQM_NODE})"
 		iqm_ready
 		;;
+	gateway)
+		echo "QFw Slurm gateway (${QFW_GATEWAY_HOST}:${QFW_GATEWAY_PORT})"
+		gateway_managed_ready
+		;;
 	esac
 }
 
@@ -297,6 +479,7 @@ start_target() {
 	directory) start_directory ;;
 	nwqsim) start_nwqsim ;;
 	iqm) start_iqm ;;
+	gateway) start_gateway ;;
 	esac
 }
 
@@ -309,6 +492,7 @@ stop_target() {
 		;;
 	nwqsim) stop_nwqsim ;;
 	iqm) stop_iqm ;;
+	gateway) stop_gateway ;;
 	esac
 }
 
@@ -320,6 +504,12 @@ recover_target() {
 	stop_target || true
 	start_target
 }
+
+if [[ ${1:-} == "__gateway-supervisor" ]]; then
+	shift
+	gateway_supervisor "$@"
+	exit $?
+fi
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -356,7 +546,7 @@ done
 	exit 2
 }
 case "${target}" in
-all|directory|nwqsim|iqm) ;;
+all|directory|nwqsim|iqm|gateway) ;;
 *) die "unknown target: ${target}" ;;
 esac
 if ! ${dry_run} && [[ ${EUID} -ne 0 ]]; then
