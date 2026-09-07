@@ -6,6 +6,10 @@
   const WIDGETS = [
     ["health", "Cluster health"],
     ["inventory", "Version and configuration inventory"],
+    ["cluster-control", "Cluster control"],
+    ["service-control", "Service control"],
+    ["node-control", "Node control"],
+    ["cluster-access", "Cluster access"],
     ["nodes", "Nodes"],
     ["services", "Services"],
     ["allocations", "Allocations"],
@@ -14,6 +18,9 @@
     ["results", "Result summary"],
     ["alerts", "Alerts"],
   ];
+  const NON_FILTERABLE_WIDGETS = new Set([
+    "cluster-control", "service-control", "node-control", "cluster-access",
+  ]);
   let runtimeApi = null;
   let activeIdentity = "user-a";
   let state = { health: "unavailable", sources: {}, operations: [], experiments: [] };
@@ -437,6 +444,10 @@
   }
 
   function renderWidgetBody(id, payload) {
+    if (id === "cluster-control") return renderClusterControl();
+    if (id === "service-control") return renderServiceControl();
+    if (id === "node-control") return renderNodeControl();
+    if (id === "cluster-access") return renderClusterAccess();
     const query = String(widgetStates[id]?.filter || "").toLowerCase();
     if (query && Array.isArray(payload)) {
       payload = payload.filter((item) => JSON.stringify(item).toLowerCase().includes(query));
@@ -642,7 +653,8 @@
       event.stopPropagation();
       openWidget(id, label);
     });
-    summary.append(filter, pop);
+    if (!NON_FILTERABLE_WIDGETS.has(id)) summary.append(filter);
+    summary.append(pop);
     details.append(summary, renderWidgetBody(id, widgetPayload(id)));
     details.addEventListener("toggle", () => {
       widgetStates[id] = { ...widgetStates[id], expanded: details.open };
@@ -741,14 +753,44 @@
   }
 
   const selectedOperations = {};
-  const operationFormState = {
-    cluster: "start",
-    serviceTarget: "all",
-    serviceAction: "start",
-    node: "",
-    nodeAction: "drain",
-    reason: "qfw-dashboard",
-  };
+
+  function controlValue(widget, name, fallback) {
+    return widgetStates[widget]?.[name] ?? fallback;
+  }
+
+  function rememberControl(widget, name, value) {
+    widgetStates[widget] = { ...widgetStates[widget], [name]: value };
+    savePresentation();
+    publishWidgets();
+  }
+
+  function selectControl(widget, name, choices, fallback) {
+    const control = element("select");
+    control.dataset.qfwControl = name;
+    choices.forEach(([value, label]) => {
+      const option = element("option", "", label);
+      option.value = value;
+      control.append(option);
+    });
+    control.value = controlValue(widget, name, fallback);
+    control.selectedOptions[0]?.setAttribute("selected", "selected");
+    control.addEventListener("change", () => {
+      rememberControl(widget, name, control.value);
+    });
+    return control;
+  }
+
+  function textControl(widget, name, fallback, placeholder) {
+    const control = element("input");
+    control.dataset.qfwControl = name;
+    control.placeholder = placeholder;
+    control.value = controlValue(widget, name, fallback);
+    control.setAttribute("value", control.value);
+    control.addEventListener("input", () => {
+      rememberControl(widget, name, control.value);
+    });
+    return control;
+  }
 
   function operationField(label, control) {
     const field = element("label", "qfw-operation-field");
@@ -809,10 +851,12 @@
     return output;
   }
 
-  function operationButtons(group, submit) {
+  function operationButtons(widget, group, submit) {
     const buttons = element("div", "qfw-operation-buttons");
     const run = element("button", "qfw-operation-run", "Run");
     run.type = "button";
+    run.dataset.qfwAction = "run";
+    run.dataset.qfwWidget = widget;
     run.disabled = activeIdentity !== "root";
     run.addEventListener("click", async () => {
       try {
@@ -823,6 +867,8 @@
     });
     const abort = element("button", "danger", "Abort");
     abort.type = "button";
+    abort.dataset.qfwAction = "abort";
+    abort.dataset.qfwWidget = widget;
     const operation = operationForGroup(group);
     abort.disabled = activeIdentity !== "root"
       || !operation || !["queued", "running", "aborting"].includes(operation.status);
@@ -838,32 +884,16 @@
     return buttons;
   }
 
-  function operationGroup(title, group) {
-    const panel = element("article", `qfw-operation-group qfw-operation-${group}`);
-    panel.append(element("h4", "", title));
-    return panel;
-  }
-
-  function renderActions(root) {
-    const controls = element("section", "qfw-actions");
-    controls.append(element("h3", "", "Operations"));
-    const groups = element("div", "qfw-operation-groups");
-
-    const cluster = operationGroup("Cluster control", "cluster");
-    const clusterAction = element("select");
-    [["start", "Start"], ["stop", "Stop"], ["restart", "Restart"],
-      ["recreate", "Recreate"]].forEach(([value, label]) => {
-      const option = element("option", "", label);
-      option.value = value;
-      clusterAction.append(option);
-    });
-    clusterAction.value = operationFormState.cluster;
-    clusterAction.addEventListener("change", () => {
-      operationFormState.cluster = clusterAction.value;
-    });
+  function renderClusterControl() {
+    const widget = "cluster-control";
+    const cluster = element("div", "qfw-operation-control qfw-operation-cluster");
+    const clusterAction = selectControl(widget, "operation", [
+      ["start", "Start"], ["stop", "Stop"], ["restart", "Restart"],
+      ["recreate", "Recreate"],
+    ], "start");
     cluster.append(
       operationField("Operation", clusterAction),
-      operationButtons("cluster", async () => {
+      operationButtons(widget, "cluster", async () => {
         const operation = clusterAction.value;
         const consequence = operation === "recreate"
           ? " This removes and recreates containers and named volumes." : "";
@@ -872,34 +902,24 @@
       }),
       operationOutput("cluster"),
     );
+    return cluster;
+  }
 
-    const services = operationGroup("Service control", "services");
-    const serviceTarget = element("select");
-    [["all", "All services"], ["directory", "Directory"],
-      ["nwqsim", "NWQSim"], ["iqm", "IQM"], ["gateway", "Gateway"]]
-      .forEach(([value, label]) => {
-        const option = element("option", "", label);
-        option.value = value;
-        serviceTarget.append(option);
-      });
-    serviceTarget.value = operationFormState.serviceTarget;
-    serviceTarget.addEventListener("change", () => {
-      operationFormState.serviceTarget = serviceTarget.value;
-    });
-    const serviceAction = element("select");
-    ["start", "stop", "restart", "recover"].forEach((value) => {
-      const option = element("option", "", value[0].toUpperCase() + value.slice(1));
-      option.value = value;
-      serviceAction.append(option);
-    });
-    serviceAction.value = operationFormState.serviceAction;
-    serviceAction.addEventListener("change", () => {
-      operationFormState.serviceAction = serviceAction.value;
-    });
+  function renderServiceControl() {
+    const widget = "service-control";
+    const services = element("div", "qfw-operation-control qfw-operation-services");
+    const serviceTarget = selectControl(widget, "target", [
+      ["all", "All services"], ["directory", "Directory"],
+      ["nwqsim", "NWQSim"], ["iqm", "IQM"], ["gateway", "Gateway"],
+    ], "all");
+    const serviceAction = selectControl(widget, "operation", [
+      ["start", "Start"], ["stop", "Stop"], ["restart", "Restart"],
+      ["recover", "Recover"],
+    ], "start");
     services.append(
       operationField("Target", serviceTarget),
       operationField("Operation", serviceAction),
-      operationButtons("services", async () => {
+      operationButtons(widget, "services", async () => {
         if (!window.confirm(
           `${serviceAction.value} ${serviceTarget.value} as root?`,
         )) return;
@@ -910,33 +930,22 @@
       }),
       operationOutput("services"),
     );
+    return services;
+  }
 
-    const nodes = operationGroup("Node control", "nodes");
-    const node = element("input");
-    node.placeholder = "node name";
-    node.value = operationFormState.node;
-    node.addEventListener("input", () => { operationFormState.node = node.value; });
-    const nodeAction = element("select");
-    [["drain", "Drain"], ["resume", "Resume"]].forEach(([value, label]) => {
-      const option = element("option", "", label);
-      option.value = value;
-      nodeAction.append(option);
-    });
-    nodeAction.value = operationFormState.nodeAction;
-    nodeAction.addEventListener("change", () => {
-      operationFormState.nodeAction = nodeAction.value;
-    });
-    const reason = element("input");
-    reason.placeholder = "drain reason";
-    reason.value = operationFormState.reason;
-    reason.addEventListener("input", () => {
-      operationFormState.reason = reason.value;
-    });
+  function renderNodeControl() {
+    const widget = "node-control";
+    const nodes = element("div", "qfw-operation-control qfw-operation-nodes");
+    const node = textControl(widget, "node", "", "node name");
+    const nodeAction = selectControl(widget, "operation", [
+      ["drain", "Drain"], ["resume", "Resume"],
+    ], "drain");
+    const reason = textControl(widget, "reason", "qfw-dashboard", "drain reason");
     nodes.append(
       operationField("Node", node),
       operationField("Operation", nodeAction),
       operationField("Reason", reason),
-      operationButtons("nodes", async () => {
+      operationButtons(widget, "nodes", async () => {
         if (!window.confirm(`${nodeAction.value} ${node.value} as root?`)) return;
         await runOperation("nodes", {
           action: `node-${nodeAction.value}`,
@@ -946,16 +955,25 @@
       }),
       operationOutput("nodes"),
     );
-
-    groups.append(cluster, services, nodes);
-    controls.append(groups);
-    root.append(controls);
+    return nodes;
   }
 
-  function renderAccess(root) {
-    const access = element("section", "qfw-access");
-    access.append(element("h3", "", "Cluster access"));
+  async function openClusterShell(target, confirmRoot = true) {
+    if (confirmRoot && activeIdentity === "root"
+        && !window.confirm(`Open a root shell in ${target}?`)) return;
+    await request("/api/qfw-dashboard/shell", {
+      method: "POST",
+      body: JSON.stringify({ identity: activeIdentity, target }),
+    });
+    runtimeApi.layout.ensurePane("shell", "status", "column");
+    window.ElectroBoyFrontend.invokeModule("project-shell", "connectProjectShellEvents");
+  }
+
+  function renderClusterAccess() {
+    const widget = "cluster-access";
+    const access = element("div", "qfw-access-control");
     const shellTarget = element("select");
+    shellTarget.dataset.qfwControl = "node";
     ["slurmctld", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8",
       "nwqsim-head", "nwqsim-worker-1", "nwqsim-worker-2", "iqm-head"]
       .forEach((name) => {
@@ -965,24 +983,24 @@
           && (name.startsWith("nwqsim-") || name === "iqm-head");
         shellTarget.append(option);
       });
+    shellTarget.value = controlValue(widget, "node", "slurmctld");
+    shellTarget.selectedOptions[0]?.setAttribute("selected", "selected");
+    shellTarget.addEventListener("change", () => {
+      rememberControl(widget, "node", shellTarget.value);
+    });
     const shell = element("button", "", "Open cluster shell");
     shell.type = "button";
+    shell.dataset.qfwAction = "open-shell";
+    shell.dataset.qfwWidget = widget;
     shell.addEventListener("click", async () => {
-      if (activeIdentity === "root"
-          && !window.confirm(`Open a root shell in ${shellTarget.value}?`)) return;
       try {
-        await request("/api/qfw-dashboard/shell", {
-          method: "POST",
-          body: JSON.stringify({ identity: activeIdentity, target: shellTarget.value }),
-        });
-        runtimeApi.layout.ensurePane("shell", "status", "column");
-        window.ElectroBoyFrontend.invokeModule("project-shell", "connectProjectShellEvents");
+        await openClusterShell(shellTarget.value);
       } catch (error) {
         window.alert(error.message);
       }
     });
     access.append(operationField("Node", shellTarget), shell);
-    root.append(access);
+    return access;
   }
 
   function renderExperimentForm(root) {
@@ -1270,8 +1288,6 @@
     const grid = element("div", "qfw-widget-grid");
     WIDGETS.forEach(([id, label]) => grid.append(buildWidget(id, label)));
     stage.append(grid);
-    renderActions(stage);
-    renderAccess(stage);
     renderExperimentForm(stage);
     viewport.append(stage);
     dashboardRoot.append(viewport);
@@ -1316,8 +1332,54 @@
         savePresentation();
         renderDashboard();
         publishWidgets();
+      } else if (message.type === "control-action" && message.widget) {
+        runPopoutControlAction(message).catch((error) => {
+          window.alert(error.message);
+        });
       }
     });
+  }
+
+  async function runPopoutControlAction(message) {
+    const values = message.values || {};
+    widgetStates[message.widget] = { ...widgetStates[message.widget], ...values };
+    savePresentation();
+    if (message.widget !== "cluster-access" && activeIdentity !== "root") {
+      throw new Error("administrative operations require the root identity");
+    }
+    if (message.action === "abort") {
+      const group = {
+        "cluster-control": "cluster",
+        "service-control": "services",
+        "node-control": "nodes",
+      }[message.widget];
+      if (group) await abortOperation(group);
+      return;
+    }
+    if (message.action === "open-shell" && message.widget === "cluster-access") {
+      await openClusterShell(values.node || "slurmctld", false);
+      return;
+    }
+    if (message.action !== "run") return;
+    if (message.widget === "cluster-control") {
+      if (!["start", "stop", "restart", "recreate"].includes(values.operation)) return;
+      await runOperation("cluster", {
+        action: `cluster-${values.operation}`, target: "cluster",
+      });
+    } else if (message.widget === "service-control") {
+      if (!["start", "stop", "restart", "recover"].includes(values.operation)) return;
+      if (!["all", "directory", "nwqsim", "iqm", "gateway"].includes(values.target)) return;
+      await runOperation("services", {
+        action: `service-${values.operation}`, target: values.target,
+      });
+    } else if (message.widget === "node-control") {
+      if (!["drain", "resume"].includes(values.operation)) return;
+      await runOperation("nodes", {
+        action: `node-${values.operation}`,
+        target: values.node || "",
+        reason: values.reason || "qfw-dashboard",
+      });
+    }
   }
 
   async function refreshState() {

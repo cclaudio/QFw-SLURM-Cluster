@@ -130,6 +130,10 @@
     const zoomIn = document.getElementById("zoomIn");
     const resetView = document.getElementById("resetView");
     const zoomLabel = document.getElementById("zoomLabel");
+    const controlWidgets = new Set([
+      "cluster-control", "service-control", "node-control", "cluster-access",
+    ]);
+    if (controlWidgets.has(widget)) filter.closest("label").hidden = true;
     let lastPayload = null;
     let lastMarkup = "";
     let lastUpdate = 0;
@@ -218,33 +222,56 @@
     });
 
     function hydrateWidget() {
-      if (widget !== "topology") return;
-      const projection = output.querySelector(".qfw-topology-projection");
-      const topologyFilter = output.querySelector(".qfw-topology-filter");
-      const zoom = output.querySelector(".qfw-topology-zoom");
-      const graph = output.querySelector(".qfw-topology-graph");
-      projection?.addEventListener("change", () => {
-        publishPresentation({ projection: projection.value });
-      });
-      topologyFilter?.addEventListener("input", () => {
-        publishPresentation({ filter: topologyFilter.value });
-      });
-      zoom?.addEventListener("input", () => {
-        if (graph) graph.style.width = `${zoom.value}%`;
-      });
-      zoom?.addEventListener("change", () => {
-        publishPresentation({ zoom: Number(zoom.value) });
-      });
-      output.querySelectorAll(".qfw-topology-graph [data-object-id]")
-        .forEach((object) => {
-          const select = () => publishPresentation({
-            selected: object.dataset.objectId,
-          });
-          object.addEventListener("click", select);
-          object.addEventListener("keydown", (event) => {
-            if (event.key === "Enter" || event.key === " ") select();
-          });
+      if (widget === "topology") {
+        const projection = output.querySelector(".qfw-topology-projection");
+        const topologyFilter = output.querySelector(".qfw-topology-filter");
+        const zoom = output.querySelector(".qfw-topology-zoom");
+        const graph = output.querySelector(".qfw-topology-graph");
+        projection?.addEventListener("change", () => {
+          publishPresentation({ projection: projection.value });
         });
+        topologyFilter?.addEventListener("input", () => {
+          publishPresentation({ filter: topologyFilter.value });
+        });
+        zoom?.addEventListener("input", () => {
+          if (graph) graph.style.width = `${zoom.value}%`;
+        });
+        zoom?.addEventListener("change", () => {
+          publishPresentation({ zoom: Number(zoom.value) });
+        });
+        output.querySelectorAll(".qfw-topology-graph [data-object-id]")
+          .forEach((object) => {
+            const select = () => publishPresentation({
+              selected: object.dataset.objectId,
+            });
+            object.addEventListener("click", select);
+            object.addEventListener("keydown", (event) => {
+              if (event.key === "Enter" || event.key === " ") select();
+            });
+          });
+      }
+      if (!controlWidgets.has(widget)) return;
+      output.querySelectorAll("[data-qfw-control]").forEach((control) => {
+        control.addEventListener("change", () => {
+          publishPresentation({ [control.dataset.qfwControl]: control.value });
+        });
+      });
+      output.querySelectorAll("[data-qfw-action]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const values = Object.fromEntries(
+            [...output.querySelectorAll("[data-qfw-control]")]
+              .map((control) => [control.dataset.qfwControl, control.value]),
+          );
+          const action = button.dataset.qfwAction;
+          const description = action === "abort"
+            ? "Abort the current operation?"
+            : action === "open-shell"
+              ? `Open a shell in ${values.node || "slurmctld"}?`
+              : `Run ${values.operation || action}?`;
+          if (!window.confirm(description)) return;
+          channel.postMessage({ type: "control-action", widget, action, values });
+        });
+      });
     }
 
     function captureMirrorScrollPositions() {

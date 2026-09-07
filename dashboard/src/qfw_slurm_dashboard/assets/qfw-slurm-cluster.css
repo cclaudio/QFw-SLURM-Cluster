@@ -32,8 +32,6 @@
 
 .qfw-dashboard-header,
 .qfw-inline-controls,
-.qfw-actions,
-.qfw-access,
 .qfw-experiment-form,
 .qfw-progress-tools,
 .qfw-view-controls {
@@ -80,8 +78,6 @@
 }
 
 .qfw-dashboard-header h2,
-.qfw-actions h3,
-.qfw-access h3,
 .qfw-experiment-form h3 {
   margin: 0;
 }
@@ -163,8 +159,6 @@
 }
 
 .qfw-widget,
-.qfw-actions,
-.qfw-access,
 .qfw-experiment-form {
   background:
     linear-gradient(135deg, rgb(94 232 255 / 9%), transparent 24%),
@@ -199,6 +193,10 @@
 }
 
 .qfw-widget[data-widget="inventory"] { flex-basis: 51em; }
+.qfw-widget[data-widget="cluster-control"] { flex-basis: 25em; }
+.qfw-widget[data-widget="service-control"] { flex-basis: 31em; }
+.qfw-widget[data-widget="node-control"] { flex-basis: 34em; }
+.qfw-widget[data-widget="cluster-access"] { flex-basis: 28em; }
 .qfw-widget[data-widget="nodes"] { flex-basis: 44em; }
 .qfw-widget[data-widget="services"] { flex-basis: 40em; }
 .qfw-widget[data-widget="allocations"] { flex-basis: 50em; }
@@ -208,8 +206,6 @@
 .qfw-widget[data-widget="alerts"] { flex-basis: 36em; }
 
 .qfw-widget::before,
-.qfw-actions::before,
-.qfw-access::before,
 .qfw-experiment-form::before {
   border-left: 2px solid var(--qfw-cyan);
   border-top: 2px solid var(--qfw-cyan);
@@ -412,16 +408,12 @@
   padding: 0 !important;
 }
 
-.qfw-actions,
-.qfw-access,
 .qfw-experiment-form {
   margin-top: 1em;
   padding: 1em;
   width: 100%;
 }
 
-.qfw-actions h3,
-.qfw-access h3,
 .qfw-experiment-form h3 {
   color: var(--qfw-violet);
   letter-spacing: 0.08em;
@@ -429,32 +421,18 @@
   text-transform: uppercase;
 }
 
-.qfw-actions button.danger { border-color: rgb(255 102 143 / 64%); }
-.qfw-actions { display: block; }
-
-.qfw-operation-groups {
-  align-items: start;
-  display: grid;
-  gap: 0.9em;
-  grid-template-columns: repeat(auto-fit, minmax(23em, 1fr));
-  margin-top: 0.8em;
-}
-
-.qfw-operation-group {
+.qfw-operation-control {
   background: rgb(5 20 34 / 72%);
   border: 1px solid var(--qfw-line-soft);
   display: grid;
   gap: 0.65em;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 0.65em;
   padding: 0.8em;
 }
 
-.qfw-operation-group h4 {
-  color: var(--qfw-cyan);
-  grid-column: 1 / -1;
-  letter-spacing: 0.06em;
-  margin: 0;
-  text-transform: uppercase;
+.qfw-operation-control button.danger {
+  border-color: rgb(255 102 143 / 64%);
 }
 
 .qfw-operation-field {
@@ -494,12 +472,14 @@
   white-space: pre-wrap;
 }
 
-.qfw-access {
-  justify-content: flex-start;
-  width: min(42em, 100%);
+.qfw-access-control {
+  align-items: end;
+  display: flex;
+  gap: 0.65em;
+  margin-top: 0.65em;
 }
 
-.qfw-access .qfw-operation-field { min-width: 16em; }
+.qfw-access-control .qfw-operation-field { flex: 1 1 16em; }
 .qfw-command-preview { flex-basis: 100%; overflow-wrap: anywhere; }
 
 .qfw-topology {

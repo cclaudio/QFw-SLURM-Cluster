@@ -74,6 +74,7 @@ def main() -> int:
             ">Cluster control<",
             ">Service control<",
             ">Node control<",
+            ">Cluster access<",
         )
         missing = [value for value in required if value not in html]
         forbidden = (
@@ -85,7 +86,8 @@ def main() -> int:
         present = [value for value in forbidden if value in html]
         widgets = tuple(
             f'data-widget="{name}"' for name in (
-                "health", "inventory", "nodes", "services", "allocations",
+                "health", "inventory", "cluster-control", "service-control",
+                "node-control", "cluster-access", "nodes", "services", "allocations",
                 "experiments", "topology", "results", "alerts",
             )
         )

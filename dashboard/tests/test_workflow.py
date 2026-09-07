@@ -23,7 +23,8 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     for label in ("Dashboard", "Progress", "File", "Shell"):
         assert f'label: "{label}"' in frontend
     for widget in (
-        "health", "inventory", "nodes", "services", "allocations",
+        "health", "inventory", "cluster-control", "service-control",
+        "node-control", "cluster-access", "nodes", "services", "allocations",
         "experiments", "topology", "results", "alerts",
     ):
         assert f'["{widget}",' in frontend
@@ -39,10 +40,12 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "restoreWidgetScrollPositions(scrollPositions)" in frontend
     assert "function renderAlerts(payload)" in frontend
     assert 'element("pre", "qfw-alert-detail")' in frontend
-    assert 'operationGroup("Cluster control", "cluster")' in frontend
-    assert 'operationGroup("Service control", "services")' in frontend
-    assert 'operationGroup("Node control", "nodes")' in frontend
+    assert "function renderClusterControl()" in frontend
+    assert "function renderServiceControl()" in frontend
+    assert "function renderNodeControl()" in frontend
+    assert "function renderClusterAccess()" in frontend
     assert 'action: `service-${serviceAction.value}`' in frontend
+    assert 'message.type === "control-action"' in frontend
     assert "/api/qfw-dashboard/operations/abort" in frontend
     assert 'element("pre", "qfw-operation-output")' in frontend
     assert "markup: rendered.outerHTML" in frontend
@@ -54,7 +57,9 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "template.innerHTML = lastMarkup" in popout
     assert "JSON.stringify(lastPayload" not in popout
     assert "function hydrateWidget()" in popout
-    assert 'widget !== "topology"' in popout
+    assert 'widget === "topology"' in popout
+    assert 'type: "control-action"' in popout
+    assert "controlWidgets.has(widget)" in popout
     assert "graph.style.width" in popout
     assert 'zoom?.addEventListener("change"' in popout
     assert 'class="qfw-widget-viewport"' in popout
@@ -90,5 +95,5 @@ def test_dashboard_uses_electroboy_pane_colors() -> None:
     assert ".qfw-progress-tools select option" in stylesheet
     assert ".qfw-widget-window select option" in stylesheet
     assert "background: #0a2235;" in stylesheet
-    assert ".qfw-operation-groups" in stylesheet
+    assert ".qfw-operation-control" in stylesheet
     assert ".qfw-operation-output" in stylesheet
