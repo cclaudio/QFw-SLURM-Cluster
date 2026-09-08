@@ -707,6 +707,9 @@ class DashboardService:
                 "example": example,
                 "allocation_mode": mode,
                 "requirements": requirements,
+                "submission_entry_id": str(
+                    request.get("submission_entry_id", "")
+                ).strip(),
                 "retry_of": str(request.get("retry_of", "")),
                 "cluster_revision": self._revision(self.cluster_root),
                 "electroboy_revision": self._revision(

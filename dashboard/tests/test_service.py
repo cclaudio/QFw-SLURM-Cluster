@@ -351,6 +351,48 @@ def test_submission_set_starts_each_validated_experiment(tmp_path) -> None:
     } == {first_id, second_id}
 
 
+def test_submission_records_reusable_submission_entry_identity(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    entry_id = "0e52826c-d58d-42bc-9c4d-bf6062d78614"
+    with patch("qfw_slurm_dashboard.service.threading.Thread", DeferredThread):
+        experiment = dashboard.submit_experiment({
+            "experiment_id": "1e6d5bad-69ca-45a7-91dd-a42c4ba7a14f",
+            "submission_entry_id": entry_id,
+            "identity": "user-a",
+            "backend": "nwqsim",
+            "example": "ghz-qiskit",
+        })
+
+    assert experiment.manifest["submission_entry_id"] == entry_id
+
+
+def test_submission_entry_can_create_repeated_same_example_executions(
+    tmp_path,
+) -> None:
+    dashboard = service(tmp_path)
+    entry_id = "0e52826c-d58d-42bc-9c4d-bf6062d78614"
+    first_id = "1e6d5bad-69ca-45a7-91dd-a42c4ba7a14f"
+    second_id = "2de5896f-63db-40d7-903e-3d67fd81b588"
+    DeferredThread.started = []
+    with patch("qfw_slurm_dashboard.service.threading.Thread", DeferredThread):
+        for experiment_id in (first_id, second_id):
+            dashboard.submit_experiment({
+                "experiment_id": experiment_id,
+                "submission_entry_id": entry_id,
+                "identity": "user-a",
+                "backend": "nwqsim",
+                "example": "ghz-qiskit",
+                "application_parameters": {"qubits": 4, "iterations": 1},
+            })
+
+    records = dashboard.store.experiments()
+    assert {item["experiment_id"] for item in records} == {first_id, second_id}
+    assert {
+        item["manifest"]["submission_entry_id"] for item in records
+    } == {entry_id}
+    assert DeferredThread.started == [first_id, second_id]
+
+
 def test_submission_set_validates_every_entry_before_starting_any(tmp_path) -> None:
     dashboard = service(tmp_path)
     DeferredThread.started = []

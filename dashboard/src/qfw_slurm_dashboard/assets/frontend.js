@@ -56,6 +56,10 @@
     "#32d6c5", "#75d982", "#54b8ff", "#8fa3ff", "#c893ff",
     "#ef8fd2", "#e6dc68", "#68d8f0", "#a8dc72", "#d4a5ff",
   ];
+  const ACTIVE_EXPERIMENT_STATES = new Set([
+    "created", "submitting", "submitted", "pending",
+    "configuring", "running", "completing", "cancel-requested",
+  ]);
   let runtimeApi = null;
   let activeIdentity = "user-a";
   let state = { health: "unavailable", sources: {}, operations: [], experiments: [] };
@@ -605,12 +609,7 @@
       ];
     }
     if (id === "experiments") return state.running_experiments || [];
-    if (id === "results") {
-      return (state.experiments || []).filter((item) =>
-        Boolean(item.completed_at)
-        && item.result
-        && Object.keys(item.result).length > 0);
-    }
+    if (id === "results") return state.experiments || [];
     if (id === "alerts") {
       return Object.values(state.sources || {})
         .filter((source) => source.status !== "ready")
@@ -932,6 +931,22 @@
     svg.style.width = `${Number(zoom.value)}%`;
     const positions = new Map();
     const partitionFrames = [];
+    function objectHeight(item) {
+      return item?.type === "service" && item.jobs?.length
+        ? 68 + item.jobs.length * 7 : 64;
+    }
+    function placeObjectRows(items, startY, startX = 35) {
+      let rowY = startY;
+      for (let index = 0; index < items.length; index += 4) {
+        const row = items.slice(index, index + 4);
+        row.forEach((item, column) => positions.set(item.id, {
+          x: startX + column * 215,
+          y: rowY,
+        }));
+        rowY += Math.max(...row.map(objectHeight), 64) + 20;
+      }
+      return rowY;
+    }
     let graphHeight = 500;
     if (projection.value === "cluster") {
       const objectsById = new Map(objects.map((item) => [item.id, item]));
@@ -960,12 +975,8 @@
       const controller = unpartitioned.find((item) => item.type === "controller");
       if (controller) positions.set(controller.id, { x: 357, y: 25 });
       const controllerObjects = unpartitioned.filter((item) => item !== controller);
-      controllerObjects.forEach((item, index) => positions.set(item.id, {
-        x: 35 + (index % 4) * 215,
-        y: 110 + Math.floor(index / 4) * 90,
-      }));
-      let partitionY = controllerObjects.length
-        ? 125 + Math.ceil(controllerObjects.length / 4) * 90 : 115;
+      const controllerBottom = placeObjectRows(controllerObjects, 110);
+      let partitionY = controllerObjects.length ? controllerBottom + 5 : 115;
       [...partitioned.entries()].sort(([left], [right]) =>
         left.localeCompare(right)).forEach(([partition, items], partitionIndex) => {
         items.sort((left, right) => {
@@ -973,20 +984,17 @@
           return (typeOrder[left.type] ?? 4) - (typeOrder[right.type] ?? 4)
             || String(left.id).localeCompare(String(right.id));
         });
-        const rows = Math.max(1, Math.ceil(items.length / 4));
         const frame = {
           id: partition,
           x: 20,
           y: partitionY,
           width: 860,
-          height: 58 + rows * 84,
+          height: 0,
           index: partitionIndex,
         };
         partitionFrames.push(frame);
-        items.forEach((item, index) => positions.set(item.id, {
-          x: frame.x + 22 + (index % 4) * 205,
-          y: frame.y + 50 + Math.floor(index / 4) * 84,
-        }));
+        const itemBottom = placeObjectRows(items, frame.y + 50, frame.x + 22);
+        frame.height = Math.max(142, itemBottom - frame.y + 4);
         partitionY += frame.height + 24;
       });
       graphHeight = Math.max(500, partitionY + 20);
@@ -1026,9 +1034,9 @@
       const parentObject = objects.find((candidate) => candidate.id === item.parent);
       const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
       line.setAttribute("x1", String(source.x + 92));
-      line.setAttribute("y1", String(source.y + 32));
+      line.setAttribute("y1", String(source.y + objectHeight(parentObject) / 2));
       line.setAttribute("x2", String(target.x + 92));
-      line.setAttribute("y2", String(target.y + 32));
+      line.setAttribute("y2", String(target.y + objectHeight(item) / 2));
       const serviceEdge = item.type === "service" || parentObject?.type === "service";
       line.setAttribute(
         "class",
@@ -1057,7 +1065,7 @@
       }
       const box = document.createElementNS("http://www.w3.org/2000/svg", "rect");
       box.setAttribute("width", "185");
-      box.setAttribute("height", "64");
+      box.setAttribute("height", String(objectHeight(item)));
       box.setAttribute("rx", item.type === "service" ? "16" : "8");
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
       label.setAttribute("x", item.type === "service" ? "92.5" : "10");
@@ -1130,15 +1138,14 @@
         && !["down", "failed", "stopped", "unavailable"].includes(
           topologyState(item.state)
         )) {
-        const width = 169 / item.jobs.length;
         item.jobs.forEach((job, jobIndex) => {
           const stripe = document.createElementNS(
             "http://www.w3.org/2000/svg", "rect",
           );
           stripe.classList.add("qfw-topology-job-stripe");
-          stripe.setAttribute("x", String(8 + jobIndex * width));
-          stripe.setAttribute("y", "56");
-          stripe.setAttribute("width", String(Math.max(2, width - 2)));
+          stripe.setAttribute("x", "8");
+          stripe.setAttribute("y", String(62 + jobIndex * 7));
+          stripe.setAttribute("width", "169");
           stripe.setAttribute("height", "5");
           stripe.setAttribute("rx", "2.5");
           stripe.style.fill = job.color;
@@ -1900,14 +1907,54 @@
       entry.request?.identity === activeIdentity);
   }
 
+  function experimentsForSubmissionEntry(entry) {
+    const knownIds = new Set([
+      ...(entry.execution_ids || []),
+      entry.active_experiment_id,
+      entry.request?.experiment_id,
+    ].filter(Boolean));
+    return (state.experiments || []).filter((item) =>
+      item.manifest?.submission_entry_id === entry.draft_id
+      || knownIds.has(item.experiment_id)).sort((left, right) =>
+      String(left.created_at || "").localeCompare(String(right.created_at || "")));
+  }
+
+  function latestSubmissionEntryExperiment(entry) {
+    const executions = experimentsForSubmissionEntry(entry);
+    if (entry.active_experiment_id) {
+      const active = executions.find((item) =>
+        item.experiment_id === entry.active_experiment_id);
+      if (active) return active;
+      if (ACTIVE_EXPERIMENT_STATES.has(String(entry.status || "").toLowerCase())) {
+        return undefined;
+      }
+    }
+    return executions[executions.length - 1];
+  }
+
+  function submissionEntryIsInFlight(entry) {
+    const experiment = latestSubmissionEntryExperiment(entry);
+    const status = String(experiment?.status || entry.status || "").toLowerCase();
+    const liveIds = new Set((state.running_experiments || []).map((item) =>
+      item.experiment_id));
+    const experimentId = experiment?.experiment_id || entry.active_experiment_id;
+    return ACTIVE_EXPERIMENT_STATES.has(status)
+      || (experimentId && liveIds.has(experimentId));
+  }
+
+  function submissionDefinition(payload, draftId) {
+    const definition = { ...payload, submission_entry_id: draftId };
+    delete definition.experiment_id;
+    return definition;
+  }
+
   function trackedExperimentSubmission() {
     const selectedId = widgetStates.submissionSetSelected;
     const entry = visibleSubmissionSetEntries().find((item) =>
       item.draft_id === selectedId);
     if (!entry) return {};
-    return (state.experiments || []).find((item) =>
-      item.experiment_id === entry.request?.experiment_id) || {
-      experiment_id: entry.request?.experiment_id || "",
+    return latestSubmissionEntryExperiment(entry) || {
+      experiment_id: entry.active_experiment_id || "",
       status: entry.status || "staged",
       slurm_job_id: entry.slurm_job_id || "",
       manifest: entry.manifest || {},
@@ -1954,15 +2001,14 @@
     const terminal = form.querySelector("[data-qfw-submission-output]");
     if (!submit || !output || !terminal) return;
     const entries = visibleSubmissionSetEntries();
-    const staged = entries.filter((entry) => !entry.submitted);
+    const staged = entries.filter((entry) => !submissionEntryIsInFlight(entry));
     const batchStatus = widgetStates.submissionSetStatus || {};
     const editing = Boolean(widgetStates.submissionSetEditing);
     const requestPending = batchStatus.status === "requesting";
     form.querySelectorAll(".qfw-submission-set-row").forEach((row) => {
       const entry = entries.find((item) => item.draft_id === row.dataset.draftId);
       if (!entry) return;
-      const experiment = (state.experiments || []).find((item) =>
-        item.experiment_id === entry.request?.experiment_id);
+      const experiment = latestSubmissionEntryExperiment(entry);
       const rowStatus = experiment?.status || entry.status || "staged";
       const statusNode = row.querySelector(".qfw-submission-set-state");
       if (statusNode) {
@@ -1972,6 +2018,7 @@
       row.classList.toggle(
         "has-error", ["failed", "invalid"].includes(rowStatus),
       );
+      row.classList.toggle("is-in-flight", submissionEntryIsInFlight(entry));
     });
     const submission = trackedExperimentSubmission();
     const status = String(submission.status || "idle").toLowerCase();
@@ -1983,7 +2030,7 @@
     form.classList.toggle("is-submitting", requestPending);
     form.classList.toggle("has-error", failed);
     submit.classList.toggle("is-depressed", requestPending);
-    submit.disabled = requestPending || editing || staged.length === 0;
+    submit.disabled = requestPending || editing || entries.length === 0;
     submit.textContent = `Submit All (${staged.length})`;
     submit.setAttribute("aria-pressed", requestPending ? "true" : "false");
     submit.setAttribute("aria-busy", requestPending ? "true" : "false");
@@ -2549,14 +2596,14 @@
       submissionSetList.replaceChildren();
       if (!entries.length) submissionSetList.append(submissionSetEmpty);
       entries.forEach((entry) => {
-        const experiment = (state.experiments || []).find((item) =>
-          item.experiment_id === entry.request?.experiment_id);
+        const experiment = latestSubmissionEntryExperiment(entry);
         const status = experiment?.status || entry.status || "staged";
         const row = element("div", "qfw-submission-set-row");
         row.dataset.draftId = entry.draft_id;
         row.classList.toggle("is-editing", editingId === entry.draft_id);
         row.classList.toggle("is-viewing", selectedId === entry.draft_id);
         row.classList.toggle("has-error", ["failed", "invalid"].includes(status));
+        row.classList.toggle("is-in-flight", submissionEntryIsInFlight(entry));
         const source = entry.request?.application_source || "example";
         const name = source === "path"
           ? String(entry.request?.application_path || "application").split("/").pop()
@@ -2572,14 +2619,13 @@
         const save = iconButton("save", "Save application changes");
         const cancel = iconButton("cancel", "Cancel application changes");
         const remove = iconButton("trash", "Remove application");
-        edit.disabled = Boolean(entry.submitted || editingId);
+        edit.disabled = Boolean(editingId);
         save.disabled = editingId !== entry.draft_id;
         cancel.disabled = editingId !== entry.draft_id;
-        remove.disabled = Boolean(entry.submitted
-          || (editingId && editingId !== entry.draft_id));
+        remove.disabled = Boolean(editingId && editingId !== entry.draft_id);
         view.addEventListener("click", async () => {
           widgetStates.submissionSetSelected = entry.draft_id;
-          if (!entry.submitted && !entry.preview) {
+          if (!entry.preview) {
             try {
               const result = await request("/api/qfw-dashboard/preview", {
                 method: "POST", body: JSON.stringify(entry.request),
@@ -2605,11 +2651,10 @@
           publishWidgets();
         });
         save.addEventListener("click", () => {
-          entry.request = {
-            ...formPayload(), experiment_id: entry.request.experiment_id,
-          };
+          const inFlight = submissionEntryIsInFlight(entry);
+          entry.request = submissionDefinition(formPayload(), entry.draft_id);
           entry.preview = "";
-          entry.status = "staged";
+          if (!inFlight) entry.status = "staged";
           delete entry.error;
           replaceSubmissionSet(entries);
           if (widgetStates.submissionSetStatus?.draft_id === entry.draft_id) {
@@ -2654,17 +2699,17 @@
         const result = await request("/api/qfw-dashboard/preview", {
           method: "POST", body: JSON.stringify(payload),
         });
-        payload.experiment_id = result.experiment_id;
+        const draftId = window.crypto.randomUUID();
         const entries = visibleSubmissionSetEntries();
         entries.push({
-          draft_id: result.experiment_id,
-          request: payload,
+          draft_id: draftId,
+          request: submissionDefinition(payload, draftId),
           preview: result.command,
           status: "staged",
-          submitted: false,
+          execution_ids: [],
         });
         replaceSubmissionSet(entries);
-        widgetStates.submissionSetSelected = result.experiment_id;
+        widgetStates.submissionSetSelected = draftId;
         widgetStates.submissionSetStatus = { status: "staged" };
         experimentId = window.crypto.randomUUID();
         saveDraft();
@@ -2678,8 +2723,13 @@
 
     submitSet.addEventListener("click", async () => {
       const entries = visibleSubmissionSetEntries();
-      const staged = entries.filter((entry) => !entry.submitted);
-      if (!staged.length) return;
+      const staged = entries.filter((entry) => !submissionEntryIsInFlight(entry));
+      if (!staged.length) {
+        submissionStatus.textContent =
+          "All submission entries already have an in-flight execution.";
+        submissionStatus.dataset.state = "idle";
+        return;
+      }
       const hardware = staged.some((entry) => entry.request?.backend === "iqm");
       if (hardware && !await confirmDashboardAction(
         "Submit real-hardware applications",
@@ -2689,9 +2739,19 @@
       widgetStates.submissionSetStatus = {
         status: "requesting", count: staged.length,
       };
-      staged.forEach((entry) => {
-        entry.status = "staged";
+      const executionEntries = new Map();
+      const executionRequests = staged.map((entry) => {
+        const experimentId = window.crypto.randomUUID();
+        executionEntries.set(experimentId, entry);
+        entry.active_experiment_id = experimentId;
+        entry.status = "submitting";
         delete entry.error;
+        return {
+          ...entry.request,
+          identity: activeIdentity,
+          submission_entry_id: entry.draft_id,
+          experiment_id: experimentId,
+        };
       });
       replaceSubmissionSet(entries);
       savePresentation();
@@ -2702,16 +2762,19 @@
           body: JSON.stringify({
             identity: activeIdentity,
             submit_real_hardware: hardware,
-            experiments: staged.map((entry) => entry.request),
+            experiments: executionRequests,
           }),
         });
         const accepted = new Map(result.experiments.map((item) => [
           item.experiment_id, item,
         ]));
-        entries.forEach((entry) => {
-          const experiment = accepted.get(entry.request?.experiment_id);
-          if (!experiment) return;
-          entry.submitted = true;
+        accepted.forEach((experiment, experimentId) => {
+          const entry = executionEntries.get(experimentId);
+          if (!entry) return;
+          entry.execution_ids = [...new Set([
+            ...(entry.execution_ids || []), experimentId,
+          ])];
+          entry.active_experiment_id = experimentId;
           entry.status = experiment.status;
           entry.slurm_job_id = experiment.slurm_job_id || "";
           entry.manifest = experiment.manifest || {};
@@ -2724,9 +2787,15 @@
         await refreshState();
       } catch (error) {
         const failure = error.payload?.error?.submission || {};
-        const failed = entries.find((entry) =>
-          entry.request?.experiment_id === failure.experiment_id)
+        const failed = executionEntries.get(failure.experiment_id)
           || staged[Number(failure.index)];
+        staged.forEach((entry) => {
+          if (entry.active_experiment_id
+              && executionEntries.has(entry.active_experiment_id)) {
+            delete entry.active_experiment_id;
+            entry.status = latestSubmissionEntryExperiment(entry)?.status || "staged";
+          }
+        });
         if (failed) {
           failed.status = "invalid";
           failed.error = error.message;

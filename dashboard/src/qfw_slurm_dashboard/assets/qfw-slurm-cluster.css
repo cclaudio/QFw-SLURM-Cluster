@@ -886,6 +886,11 @@
   border-color: rgb(255 102 143 / 76%);
 }
 
+.qfw-submission-set-row.is-in-flight:not(.has-error) {
+  animation: qfw-running-entry-pulse 1.15s ease-in-out infinite alternate;
+  border-color: rgb(45 244 195 / 82%);
+}
+
 .qfw-submission-set-identity {
   align-items: baseline;
   display: flex;
@@ -1312,6 +1317,17 @@
   to { opacity: 1; }
 }
 
+@keyframes qfw-running-entry-pulse {
+  from {
+    border-color: rgb(45 244 195 / 52%);
+    box-shadow: 0 0 0.25em rgb(45 244 195 / 12%);
+  }
+  to {
+    border-color: rgb(112 255 195 / 100%);
+    box-shadow: 0 0 1em rgb(45 244 195 / 58%);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .qfw-widget::after,
   .qfw-widget-mirror::after {
@@ -1321,6 +1337,10 @@
   .qfw-widget-chevron { transition: none; }
 
   .qfw-experiment-submission-status[data-state="running"]::before {
+    animation: none;
+  }
+
+  .qfw-submission-set-row.is-in-flight:not(.has-error) {
     animation: none;
   }
 }

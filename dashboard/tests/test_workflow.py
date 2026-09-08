@@ -68,8 +68,7 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "This example has no configurable runtime parameters." in frontend
     assert '"Preview batch file"' in frontend
     assert 'if (id === "experiments") return state.running_experiments || [];' in frontend
-    assert "Boolean(item.completed_at)" in frontend
-    assert "Object.keys(item.result).length > 0" in frontend
+    assert 'if (id === "results") return state.experiments || [];' in frontend
     assert '"Submit Application"' in frontend
     assert '"Submit experiment"' not in frontend
     assert "function packagedExamples()" in frontend
@@ -98,7 +97,10 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "Loading live topology sources:" in frontend
     assert "refreshExperimentSubmissionStatus" in frontend
     assert "function visibleSubmissionSetEntries()" in frontend
-    assert "item.experiment_id === entry.request?.experiment_id" in frontend
+    assert "function experimentsForSubmissionEntry(entry)" in frontend
+    assert "item.manifest?.submission_entry_id === entry.draft_id" in frontend
+    assert "function submissionEntryIsInFlight(entry)" in frontend
+    assert "function submissionDefinition(payload, draftId)" in frontend
     assert 'statusNode.textContent = rowStatus;' in frontend
     assert 'terminal.textContent = [' in frontend
     assert 'submission.result?.output_tail' in frontend
@@ -106,7 +108,7 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "Submitting ${staged.length} applications" in frontend
     assert "qfwSubmitSet" in frontend
     assert 'const requestPending = batchStatus.status === "requesting";' in frontend
-    assert "submit.disabled = requestPending || editing || staged.length === 0;" in frontend
+    assert "submit.disabled = requestPending || editing || entries.length === 0;" in frontend
     assert "submit.disabled = active;" not in frontend
     assert '"Add to Submission Set"' in frontend
     assert '"Submit All (0)"' in frontend
@@ -122,6 +124,12 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert 'entry.status = "staged";' in frontend
     assert "delete entry.error;" in frontend
     assert "Validation error for ${invalid.request?.example" in frontend
+    assert "const draftId = window.crypto.randomUUID();" in frontend
+    assert "const experimentId = window.crypto.randomUUID();" in frontend
+    assert "execution_ids: []" in frontend
+    assert "entry.execution_ids = [...new Set([" in frontend
+    assert 'row.classList.toggle("is-in-flight", submissionEntryIsInFlight(entry));' in frontend
+    assert "entry.submitted" not in frontend
     assert 'name !== "qfw-services"' in frontend
     assert 'job.job_name || "Slurm job"' in frontend
     assert "qfw-topology-state-" in frontend
@@ -142,6 +150,11 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "function topologyState(value)" in frontend
     assert '"qfw-topology-job-active"' in frontend
     assert '"qfw-topology-job-stripe"' in frontend
+    assert 'stripe.setAttribute("x", "8")' in frontend
+    assert 'stripe.setAttribute("width", "169")' in frontend
+    assert "String(62 + jobIndex * 7)" in frontend
+    assert "function objectHeight(item)" in frontend
+    assert "function placeObjectRows(items, startY, startX = 35)" in frontend
     assert "function showTopologyHover" in frontend
     assert "rootBounds.width / root.offsetWidth" in frontend
     assert "(clientX - rootBounds.left + 14) / safeScaleX" in frontend
@@ -360,3 +373,5 @@ def test_dashboard_uses_electroboy_pane_colors() -> None:
     assert ".qfw-operation-run.is-pressed" in stylesheet
     assert ".qfw-operation-status" in stylesheet
     assert "@keyframes qfw-operation-dot" in stylesheet
+    assert "@keyframes qfw-running-entry-pulse" in stylesheet
+    assert ".qfw-submission-set-row.is-in-flight:not(.has-error)" in stylesheet
