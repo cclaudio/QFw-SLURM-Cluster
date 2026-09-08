@@ -555,16 +555,21 @@ def test_service_status_returns_concise_health_output(tmp_path) -> None:
             on_line(line)
         return CommandResult(tuple(command), 0, detail, "")
 
-    with patch("qfw_slurm_dashboard.service.threading.Thread", ImmediateThread):
-        with patch.object(dashboard.runner, "stream_host") as host:
-            host.side_effect = stream
-            operation = dashboard.submit_action(
-                "service-status", "root", target="all"
-            )
+    with patch("qfw_slurm_dashboard.service.threading.Thread", ImmediateThread), \
+         patch("qfw_slurm_dashboard.service.service_health_summary") as summary, \
+         patch.object(dashboard.runner, "stream_host") as host:
+        host.side_effect = stream
+        summary.return_value = [
+            "QFw site services: DOWN", "", "IQM: DOWN",
+        ]
+        operation = dashboard.submit_action(
+            "service-status", "root", target="all"
+        )
     argv = host.call_args.args[0]
     assert "qfw-site-services status --target all" in argv[-1]
     assert operation.status == "succeeded"
     assert any("QFw site services: DOWN" in line for line in operation.output)
+    summary.assert_called_once_with(dashboard.runner, "all")
 
 
 def test_service_action_rejects_unknown_target(tmp_path) -> None:

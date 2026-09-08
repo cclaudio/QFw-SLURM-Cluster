@@ -272,6 +272,110 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
     return SourceState("service-plane", status, utc_now(), records)
 
 
+def reconcile_qpm_registration(
+    sources: list[SourceState],
+) -> list[SourceState]:
+    """Require a live directory registration for a managed QPM to be ready."""
+    by_name = {source.name: source for source in sources}
+    catalog = by_name.get("services")
+    service_plane = by_name.get("service-plane")
+    if catalog is None or service_plane is None or catalog.status == "loading":
+        return sources
+
+    catalog_by_id = {
+        str(record.get("service_id")): record
+        for record in catalog.records
+        if record.get("service_id")
+    }
+    records: list[dict[str, Any]] = []
+    for original in service_plane.records:
+        record = dict(original)
+        if record.get("component") not in {"nwqsim", "iqm"}:
+            records.append(record)
+            continue
+        process_state = str(record.get("state", "stopped")).lower()
+        catalog_record = catalog_by_id.get(str(record.get("service_id")), {})
+        registration_state = str(catalog_record.get("state", "DOWN")).upper()
+        try:
+            generation = int(catalog_record.get("generation", 0) or 0)
+        except (TypeError, ValueError):
+            generation = 0
+        registered = (
+            catalog.status in {"ready", "degraded"}
+            and registration_state not in {
+                "", "DOWN", "ERROR", "STALE", "STOPPED", "UNAVAILABLE",
+            }
+            and bool(catalog_record.get("runtime_id"))
+            and generation > 0
+        )
+        record.update({
+            "process_state": process_state,
+            "registration_state": registration_state,
+            "registered": registered,
+        })
+        if process_state == "ready" and not registered:
+            record["state"] = "stopped"
+            record["ready"] = False
+            record["health_detail"] = (
+                "process is ready but the QPM is not registered with the "
+                "directory service"
+            )
+        records.append(record)
+
+    ready = sum(record.get("state") == "ready" for record in records)
+    status = (
+        "ready" if records and ready == len(records)
+        else "degraded" if ready
+        else "stopped"
+    )
+    replacement = SourceState(
+        service_plane.name,
+        status,
+        service_plane.observed_at,
+        records,
+        service_plane.error,
+    )
+    return [replacement if source.name == "service-plane" else source
+            for source in sources]
+
+
+def service_health_summary(
+    runner: CommandRunner, target: str = "all",
+) -> list[str]:
+    sources = reconcile_qpm_registration([
+        service_plane_status(runner),
+        service_status(runner),
+    ])
+    service_plane = next(
+        source for source in sources if source.name == "service-plane")
+    records = {
+        str(record.get("component")): record
+        for record in service_plane.records
+        if record.get("component") != "dvm"
+    }
+    labels = {
+        "directory": "Directory",
+        "nwqsim": "NWQSim",
+        "iqm": "IQM",
+        "gateway": "Gateway",
+    }
+    selected = list(labels) if target == "all" else [target]
+    lines = []
+    all_ready = True
+    for component in selected:
+        record = records.get(component, {})
+        ready = str(record.get("state", "stopped")).lower() == "ready"
+        all_ready = all_ready and ready
+        state = "UP" if ready else "DOWN"
+        if not ready and record.get("process_state") == "ready" \
+                and not record.get("registered", False):
+            state += " (process ready; not registered)"
+        lines.append(f"{labels[component]}: {state}")
+    overall = "UP" if all_ready and lines else "DOWN"
+    heading = "QFw site services" if target == "all" else labels[target]
+    return [f"{heading}: {overall}", "", *lines]
+
+
 def inventory_status(runner: CommandRunner) -> SourceState:
     records: list[dict[str, Any]] = []
     cluster_revision = runner.host(("git", "rev-parse", "HEAD"))
@@ -529,4 +633,4 @@ def collect_all(runner: CommandRunner) -> list[SourceState]:
             return _unavailable(name, str(error))
 
     with ThreadPoolExecutor(max_workers=len(COLLECTORS)) as pool:
-        return list(pool.map(collect, COLLECTORS))
+        return reconcile_qpm_registration(list(pool.map(collect, COLLECTORS)))

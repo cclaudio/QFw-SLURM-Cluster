@@ -22,6 +22,8 @@ from .collectors import (
     diagnostics,
     inventory_status,
     LiveCollectorSet,
+    reconcile_qpm_registration,
+    service_health_summary,
 )
 from .models import Experiment, Operation, aggregate_state, utc_now
 from .logs import LogSource, SERVICE_DIAGNOSTICS, SOURCES, read_source
@@ -153,7 +155,8 @@ class DashboardService:
             if self._state_cache is not None and now - self._state_cached_at < 2:
                 return self._state_cache
             self._refresh_experiments()
-            payload = aggregate_state(self.live_collectors.snapshot())
+            payload = aggregate_state(reconcile_qpm_registration(
+                self.live_collectors.snapshot()))
             payload["operations"] = self.store.operations()
             experiments = self.store.experiments()
             payload["experiments"] = experiments
@@ -606,6 +609,12 @@ class DashboardService:
                 "aborted" if cancelled else
                 "succeeded" if result.returncode == 0 else "failed"
             )
+            if operation.action == "service-status" and \
+                    result.returncode == 0 and not cancelled:
+                operation.output = service_health_summary(
+                    self.runner, operation.target)
+                operation.return_code = 0
+                operation.status = "succeeded"
         except Exception as error:
             operation.output = [str(error)]
             operation.return_code = 1

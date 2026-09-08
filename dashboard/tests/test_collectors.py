@@ -6,6 +6,8 @@ from qfw_slurm_dashboard.collectors import (
     collect_all,
     docker_status,
     LiveCollectorSet,
+    reconcile_qpm_registration,
+    service_health_summary,
     service_plane_status,
     slurm_status,
 )
@@ -173,3 +175,94 @@ def test_service_plane_reports_each_component_independently() -> None:
     assert records["dvm"]["state"] == "ready"
     assert records["iqm"]["state"] == "ready"
     assert records["gateway"]["state"] == "ready"
+
+
+def test_qpm_processes_are_down_when_directory_registration_is_missing() -> None:
+    managed = SourceState("service-plane", "ready", utc_now(), [
+        {
+            "component": "nwqsim",
+            "service_id": "nwqsim",
+            "state": "ready",
+        },
+        {
+            "component": "iqm",
+            "service_id": "iqm-ornl-20q",
+            "state": "ready",
+        },
+    ])
+    catalog = SourceState("services", "ready", utc_now(), [
+        {
+            "service_id": "nwqsim",
+            "state": "DOWN",
+            "runtime_id": "",
+            "generation": 0,
+        },
+        {
+            "service_id": "iqm-ornl-20q",
+            "state": "DOWN",
+            "runtime_id": "",
+            "generation": 0,
+        },
+    ])
+
+    sources = reconcile_qpm_registration([managed, catalog])
+    service_plane = next(
+        source for source in sources if source.name == "service-plane")
+
+    assert service_plane.status == "stopped"
+    assert {record["component"] for record in service_plane.records} == {
+        "nwqsim", "iqm",
+    }
+    for record in service_plane.records:
+        assert record["state"] == "stopped"
+        assert record["process_state"] == "ready"
+        assert record["registered"] is False
+        assert record["registration_state"] == "DOWN"
+
+
+def test_service_health_summary_reports_unregistered_live_qpm() -> None:
+    class HealthRunner:
+        def cluster(self, identity, argv, **kwargs):
+            if argv[0] == "qfw-site-services":
+                return CommandResult(tuple(argv), 0, """{
+  "services": {
+    "directory": {"state": "up", "detail": {"components": {"directory": {"node": "slurmctld", "ready": true, "state": "ready"}}}},
+    "nwqsim": {"state": "down", "detail": {}},
+    "iqm": {"state": "up", "detail": {"components": {"qpm:iqm-ornl-20q": {"node": "iqm-head", "ready": true, "state": "ready"}}}},
+    "gateway": {"state": "up", "detail": {"state": "ready"}}
+  }
+}\n""", "")
+            return CommandResult(tuple(argv), 0, (
+                '{"services":[{"service_id":"iqm-ornl-20q",'
+                '"state":"DOWN","runtime_id":"","generation":0}],'
+                '"errors":[]}\n'), "")
+
+    lines = service_health_summary(HealthRunner(), "iqm")
+
+    assert lines == [
+        "IQM: DOWN",
+        "",
+        "IQM: DOWN (process ready; not registered)",
+    ]
+
+
+def test_idle_catalog_record_confirms_qpm_registration() -> None:
+    managed = SourceState("service-plane", "ready", utc_now(), [{
+        "component": "nwqsim",
+        "service_id": "nwqsim",
+        "state": "ready",
+    }])
+    catalog = SourceState("services", "ready", utc_now(), [{
+        "service_id": "nwqsim",
+        "state": "IDLE",
+        "runtime_id": "runtime-1",
+        "generation": 1,
+    }])
+
+    sources = reconcile_qpm_registration([managed, catalog])
+    service_plane = next(
+        source for source in sources if source.name == "service-plane")
+
+    assert service_plane.status == "ready"
+    assert service_plane.records[0]["state"] == "ready"
+    assert service_plane.records[0]["registered"] is True
