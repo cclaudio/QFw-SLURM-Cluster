@@ -38,7 +38,10 @@ service target and dependency details.
 
 The experiment form discovers the installed QFw examples. Select normal or
 heterogeneous placement, then provide the Slurm partition, node and task counts,
-optional account or QoS, and the quantum request bounds. **Preview
+optional account or QoS, and the quantum request bounds. Heterogeneous jobs put
+the application and quantum request in group 0, preserving QFw's placement
+convention. The persistent site QPMd and DVM remain outside the allocation, so
+group 1 does not start local services. **Preview
 allocation** shows the exact `sbatch` request. The submitted batch job activates
 QFw, runs the example against the persistent site QPM, and deactivates QFw
 before Slurm and qfw-slurm release the allocation.

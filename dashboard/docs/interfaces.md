@@ -29,19 +29,28 @@ policy.
 | `GET /api/qfw-dashboard/events` | Bounded cursor-based events | No |
 | `GET /api/qfw-dashboard/logs` | Bounded cursor-based source logs | No |
 | `GET /api/qfw-dashboard/artifact` | Identity-checked experiment artifact | No |
+| `GET /api/qfw-dashboard/experiments/archive` | ZIP archive of a run manifest and artifacts | No |
+| `GET /api/qfw-dashboard/services/archive` | Root-only service diagnostic ZIP | No |
 | `GET /qfw-dashboard/widget` | Same-origin widget window | No |
 | `POST /api/qfw-dashboard/operations` | Allow-listed lifecycle action | Yes |
 | `POST /api/qfw-dashboard/operations/abort` | Abort a running operation | Yes |
+| `POST /api/qfw-dashboard/reset` | Root-only Dashboard history and cache reset | Yes |
 | `POST /api/qfw-dashboard/preview` | Allocation command preview | No |
 | `POST /api/qfw-dashboard/experiments` | Slurm experiment submission | Yes |
 | `POST /api/qfw-dashboard/experiments/cancel` | Slurm cancellation | Yes |
 | `POST /api/qfw-dashboard/experiments/retry` | Repeat a retained experiment | Yes |
-| `POST /api/qfw-dashboard/results/compare` | Compare compatible results | No |
 | `POST /api/qfw-dashboard/shell` | Open an identity-bound cluster shell | Yes |
 
 Every mutation is handled by a typed service method. Browser code never owns
 the underlying policy. The JSON contract is
 [`dashboard-v1.schema.json`](../schemas/dashboard-v1.schema.json).
+
+The reset route removes only Dashboard-owned operation, experiment, and event
+history and invalidates its cached snapshots. The browser also clears saved
+widget presentation and progress state. It does not cancel Slurm jobs, release
+QPM reservations, stop services, remove experiment artifacts, or modify
+credentials. The service rejects a reset while a Dashboard lifecycle command,
+submission, or tracked Slurm job is active.
 
 ## Correlation identifiers
 
@@ -64,15 +73,24 @@ Mutation output is retained as an operation log.
 An experiment request names one of the installed examples reported by the
 state endpoint. It carries `identity`, `backend`, `example`,
 `allocation_mode`, `partition`, application `nodes` and `tasks`, optional
-heterogeneous launcher nodes and tasks, `account`, `qos`, `time_minutes`, and
+heterogeneous service nodes and tasks, `account`, `qos`, `time_minutes`, and
 the qfw-slurm quantum bounds. Zero-valued optional gate and measurement bounds
 are omitted from the Slurm command. The server validates all values before it
 constructs an argument vector.
 
-The command preview and submitted command use `sbatch`. Quantum options are
+The command preview and submitted command share one generated experiment ID,
+so the displayed batch and output paths are the paths used by submission. An
+empty partition value resolves to the `normal` application partition. Both
+paths use `sbatch`. Quantum options are
 present on the allocation request, before QFw starts. The batch payload invokes
 an explicit Bash shell, activates the installed QFw, runs the selected example
 in site mode, and calls `qfw-deactivate`.
+
+Heterogeneous batches preserve QFw's placement convention. Group 0 contains
+the application resources and quantum request. Group 1 is the service-side
+component. Dashboard applications currently use persistent site services, so
+the QPMd and DVM remain outside both components and group 1 starts no local
+services.
 
 Real-IQM requests also require `submit_real_hardware=true`. Their shots and
 walltime have stricter server-side limits. The chemistry case requires an
