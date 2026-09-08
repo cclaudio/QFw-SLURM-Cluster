@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -68,6 +70,44 @@ def _pipe_records(result: CommandResult, fields: tuple[str, ...]) -> list[dict[s
     return records
 
 
+def _slurm_number(value: Any) -> int:
+    if isinstance(value, dict):
+        number = value.get("number", 0)
+        return int(number) if value.get("set", False) else 0
+    return int(value or 0)
+
+
+def _slurm_jobs(text: str) -> list[dict[str, str]]:
+    payload = json.loads(text)
+    jobs = payload.get("jobs", [])
+    if not isinstance(jobs, list):
+        raise ValueError("Slurm JSON lacks jobs array")
+    records = []
+    for job in jobs:
+        if not isinstance(job, dict):
+            continue
+        job_id = str(job.get("job_id", ""))
+        heterogeneous_id = _slurm_number(job.get("het_job_id"))
+        if heterogeneous_id:
+            job_id = f"{heterogeneous_id}+{_slurm_number(job.get('het_job_offset'))}"
+        state = job.get("job_state", "")
+        if isinstance(state, list):
+            state = state[0] if state else ""
+        records.append({
+            "job_id": job_id,
+            "user": str(job.get("user_name", "")),
+            "state": str(state),
+            "partition": str(job.get("partition", "")),
+            "nodes": str(job.get("nodes", "")),
+            "elapsed": str(_slurm_number(job.get("time_used"))),
+            "reason": str(
+                job.get("state_description") or job.get("state_reason") or ""
+            ),
+            "job_name": str(job.get("name", "")),
+        })
+    return records
+
+
 def slurm_status(runner: CommandRunner) -> SourceState:
     controller = runner.cluster("root", ("scontrol", "ping"))
     database = runner.cluster(
@@ -81,7 +121,7 @@ def slurm_status(runner: CommandRunner) -> SourceState:
         return _unavailable("slurm", nodes.stderr or nodes.stdout)
     jobs = runner.cluster(
         "root",
-        ("squeue", "--noheader", "--format=%i|%u|%T|%P|%N|%M|%R"),
+        ("squeue", "--json"),
     )
     if jobs.returncode:
         return _unavailable("slurm", jobs.stderr or jobs.stdout)
@@ -103,13 +143,10 @@ def slurm_status(runner: CommandRunner) -> SourceState:
             ("node", "partition", "state", "reason", "cpus", "memory", "features"),
         )
     ]
-    records.extend(
-        {"kind": "job", **item}
-        for item in _pipe_records(
-            jobs,
-            ("job_id", "user", "state", "partition", "nodes", "elapsed", "reason"),
-        )
-    )
+    try:
+        records.extend({"kind": "job", **item} for item in _slurm_jobs(jobs.stdout))
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        return _unavailable("slurm", f"malformed Slurm job JSON: {error}")
     status = "ready" if controller.returncode == 0 and database.returncode == 0 \
         else "degraded"
     return SourceState("slurm", status, utc_now(), records)
@@ -158,6 +195,17 @@ def allocation_status(runner: CommandRunner) -> SourceState:
     ))
 
 
+def _first_json_object(text: str) -> dict[str, Any] | None:
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def service_plane_status(runner: CommandRunner) -> SourceState:
     result = runner.cluster("root", ("qfw-site-services", "status"), timeout=12)
     output = f"{result.stdout}\n{result.stderr}"
@@ -181,20 +229,57 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
                 if any(lines[position].startswith(value) for _, value in headings)
             ), len(lines))
             detail = "\n".join(lines[index + 1:end])
-        failed = result.returncode != 0 and (not detail or any(
-            marker in detail.lower()
-            for marker in ("not found", "not-ready", "traceback", "refused", "failed")
-        ))
+        document = _first_json_object(detail)
+        component_key = {
+            "directory": "directory",
+            "nwqsim": "qpm:nwqsim",
+            "iqm": "qpm:iqm-ornl-20q",
+        }.get(component)
+        managed = (document or {}).get("components", {}).get(component_key, {}) \
+            if component_key else {}
+        if isinstance(managed, dict) and managed:
+            component_state = str(managed.get("state", "stopped")).lower()
+            ready = managed.get("ready", component_state == "ready")
+            component_state = "ready" if ready and component_state == "ready" else "stopped"
+        else:
+            lowered = detail.lower()
+            failed = result.returncode != 0 and (not detail or any(
+                marker in lowered for marker in (
+                    "not found", "not-ready", "traceback", "refused",
+                    "failed", "stopped",
+                )
+            ))
+            component_state = "stopped" if failed else "ready"
         records.append({
             "component": component,
-            "state": "stopped" if failed else "ready",
+            "service_id": {
+                "directory": "directory-service",
+                "nwqsim": "nwqsim",
+                "iqm": "iqm-ornl-20q",
+                "gateway": "qfw-slurm-gateway",
+            }[component],
+            "node": managed.get("node", "slurmctld" if component in {
+                "directory", "gateway",
+            } else ""),
+            "state": component_state,
+            "backend": {
+                "directory": "DEFw",
+                "nwqsim": "NWQSim",
+                "iqm": "IQM",
+                "gateway": "QSGP",
+            }[component],
+            "active_reservations": "—",
             "detail": detail[-1000:],
         })
         if component == "nwqsim":
-            dvm_ready = '"role": "prte-dvm"' in detail \
-                and '"state": "ready"' in detail
+            dvm = (document or {}).get("components", {}).get("prte-dvm", {})
+            dvm_ready = isinstance(dvm, dict) and dvm.get("ready") is True \
+                and dvm.get("state") == "ready"
             records.append({
-                "component": "dvm", "state": "ready" if dvm_ready else "stopped",
+                "component": "dvm", "service_id": "nwqsim-dvm",
+                "node": dvm.get("node", "") if isinstance(dvm, dict) else "",
+                "state": "ready" if dvm_ready else "stopped",
+                "backend": "PRTE", "active_reservations": "—",
                 "detail": "NWQSim PRTE DVM",
             })
     ready = sum(item["state"] == "ready" for item in records)
@@ -246,7 +331,7 @@ def inventory_status(runner: CommandRunner) -> SourceState:
         })
     for component, path in (
         ("QFw site", "/etc/openqse/qfw/site.yaml"),
-        ("qfw-slurm", "/etc/qfw-slurm/plugin.conf"),
+        ("qfw-slurm", "/etc/openqse/qfw-slurm/plugin.conf"),
     ):
         result = runner.cluster("root", ("sha256sum", path), timeout=5)
         fingerprint = result.stdout.split()[0] if result.returncode == 0 else "unavailable"
@@ -369,20 +454,93 @@ COLLECTORS: tuple[Callable[[CommandRunner], SourceState], ...] = (
     inventory_status,
 )
 
+_COLLECTOR_NAMES = {
+    docker_status: "docker",
+    slurm_status: "slurm",
+    service_status: "services",
+    allocation_status: "allocations",
+    service_plane_status: "service-plane",
+    inventory_status: "inventory",
+}
+
+
+class LiveCollectorSet:
+    """Refresh collectors independently without blocking state snapshots."""
+
+    def __init__(
+        self,
+        runner: CommandRunner,
+        *,
+        collectors: tuple[Callable[[CommandRunner], SourceState], ...] = COLLECTORS,
+        refresh_interval: float = 2.5,
+    ) -> None:
+        self.runner = runner
+        self.collectors = collectors
+        self.refresh_interval = refresh_interval
+        self._lock = threading.Lock()
+        self._results: dict[str, SourceState] = {}
+        self._threads: dict[str, threading.Thread] = {}
+        self._finished_at: dict[str, float] = {}
+
+    @staticmethod
+    def _name(collector: Callable[[CommandRunner], SourceState]) -> str:
+        return _COLLECTOR_NAMES.get(
+            collector, collector.__name__.removesuffix("_status").replace("_", "-")
+        )
+
+    def snapshot(self) -> list[SourceState]:
+        now = time.monotonic()
+        start: list[threading.Thread] = []
+        with self._lock:
+            for collector in self.collectors:
+                name = self._name(collector)
+                if name in self._threads:
+                    continue
+                if now - self._finished_at.get(name, 0.0) < self.refresh_interval:
+                    continue
+                thread = threading.Thread(
+                    target=self._refresh,
+                    args=(name, collector),
+                    daemon=True,
+                    name=f"qfw-dashboard-collector-{name}",
+                )
+                self._threads[name] = thread
+                start.append(thread)
+            results = [
+                self._results.get(
+                    self._name(collector),
+                    SourceState(
+                        self._name(collector), "loading", utc_now(),
+                        error="live data refresh is in progress",
+                    ),
+                )
+                for collector in self.collectors
+            ]
+        for thread in start:
+            thread.start()
+        return results
+
+    def _refresh(
+        self,
+        name: str,
+        collector: Callable[[CommandRunner], SourceState],
+    ) -> None:
+        try:
+            result = collector(self.runner)
+        except Exception as error:
+            result = _unavailable(name, str(error))
+        with self._lock:
+            self._results[name] = result
+            self._finished_at[name] = time.monotonic()
+            self._threads.pop(name, None)
+
 
 def collect_all(runner: CommandRunner) -> list[SourceState]:
     def collect(collector: Callable[[CommandRunner], SourceState]) -> SourceState:
         try:
             return collector(runner)
         except Exception as error:
-            name = {
-                docker_status: "docker",
-                slurm_status: "slurm",
-                service_status: "services",
-                allocation_status: "allocations",
-                service_plane_status: "service-plane",
-                inventory_status: "inventory",
-            }[collector]
+            name = _COLLECTOR_NAMES[collector]
             return _unavailable(name, str(error))
 
     with ThreadPoolExecutor(max_workers=len(COLLECTORS)) as pool:

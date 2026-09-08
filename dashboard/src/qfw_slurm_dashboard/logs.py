@@ -20,6 +20,13 @@ class LogSource:
     visibility: str = "root"
 
 
+@dataclass(frozen=True)
+class DiagnosticFile:
+    name: str
+    container: str
+    path: str
+
+
 SOURCES = {
     "slurm": LogSource(
         "slurm", "controller", "slurmctld", "/var/log/slurm/slurmctld.log"
@@ -56,6 +63,78 @@ SOURCES = {
         "provider", "iqm-client", "iqm-head",
         "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
         "iqm-ornl-20q/logs/defw_py.log",
+    ),
+}
+
+
+SERVICE_DIAGNOSTICS = {
+    "directory-service": (
+        DiagnosticFile("logs/defw-py.log", "slurmctld",
+                       "/var/lib/qfw-site-services/directory/services/"
+                       "qfw-site-dirsvc/logs/defw_py.log"),
+        DiagnosticFile("logs/stdout.log", "slurmctld",
+                       "/var/lib/qfw-site-services/directory/services/"
+                       "qfw-site-dirsvc/logs/qfw-site-dirsvc.stdout.log"),
+        DiagnosticFile("logs/stderr.log", "slurmctld",
+                       "/var/lib/qfw-site-services/directory/services/"
+                       "qfw-site-dirsvc/logs/qfw-site-dirsvc.stderr.log"),
+        DiagnosticFile("state/ready.json", "slurmctld",
+                       "/var/lib/qfw-site-services/directory/services/"
+                       "qfw-site-dirsvc/ready.json"),
+        DiagnosticFile("state/service-plane.json", "slurmctld",
+                       "/var/lib/qfw-site-services/directory/state/"
+                       "service-plane.json"),
+    ),
+    "qfw-slurm-gateway": (
+        DiagnosticFile("logs/gateway.log", "slurmctld",
+                       "/var/log/qfw-slurm-gateway/gateway.log"),
+    ),
+    "nwqsim": (
+        DiagnosticFile("logs/defw-py.log", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/services/"
+                       "nwqsim/logs/defw_py.log"),
+        DiagnosticFile("logs/stdout.log", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/services/"
+                       "nwqsim/logs/nwqsim.stdout.log"),
+        DiagnosticFile("logs/stderr.log", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/services/"
+                       "nwqsim/logs/nwqsim.stderr.log"),
+        DiagnosticFile("state/ready.json", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/services/"
+                       "nwqsim/ready.json"),
+        DiagnosticFile("state/service-ready.json", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/services/"
+                       "nwqsim/service-ready.json"),
+        DiagnosticFile("state/service-plane.json", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/state/"
+                       "service-plane.json"),
+    ),
+    "nwqsim-dvm": (
+        DiagnosticFile("state/service-plane.json", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/state/"
+                       "service-plane.json"),
+        DiagnosticFile("state/dvm-uri", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/prte_dvm/dvm-uri"),
+    ),
+    "iqm-ornl-20q": (
+        DiagnosticFile("logs/defw-py.log", "iqm-head",
+                       "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
+                       "iqm-ornl-20q/logs/defw_py.log"),
+        DiagnosticFile("logs/stdout.log", "iqm-head",
+                       "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
+                       "iqm-ornl-20q/logs/iqm-ornl-20q.stdout.log"),
+        DiagnosticFile("logs/stderr.log", "iqm-head",
+                       "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
+                       "iqm-ornl-20q/logs/iqm-ornl-20q.stderr.log"),
+        DiagnosticFile("state/ready.json", "iqm-head",
+                       "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
+                       "iqm-ornl-20q/ready.json"),
+        DiagnosticFile("state/service-ready.json", "iqm-head",
+                       "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
+                       "iqm-ornl-20q/service-ready.json"),
+        DiagnosticFile("state/service-plane.json", "iqm-head",
+                       "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/state/"
+                       "service-plane.json"),
     ),
 }
 

@@ -50,3 +50,22 @@ def test_nested_and_quoted_credentials_are_redacted(tmp_path) -> None:
     assert "one" not in rendered
     assert "two" not in rendered
     assert "three" not in rendered
+
+
+def test_clear_dashboard_state_removes_only_dashboard_history(tmp_path) -> None:
+    store = DashboardStore(tmp_path)
+    store.save_operation(Operation("op", "test", "root", "cluster"))
+    store.save_experiment(
+        Experiment("exp", "user-a", "nwqsim", "qiskit-simple", "normal")
+    )
+    store.append_event({"kind": "log", "message": "one"})
+    unrelated = tmp_path / "artifact.log"
+    unrelated.write_text("retained\n")
+
+    cleared = store.clear_dashboard_state()
+
+    assert cleared == {"operations": 1, "experiments": 1, "events": 1}
+    assert store.operations() == []
+    assert store.experiments() == []
+    assert store.events() == {"events": [], "cursor": 0, "gap": False}
+    assert unrelated.read_text() == "retained\n"

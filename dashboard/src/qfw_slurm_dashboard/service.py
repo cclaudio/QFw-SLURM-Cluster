@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import base64
+import hashlib
+import io
 import os
 import re
 import signal
@@ -12,31 +14,24 @@ import subprocess
 import threading
 import time
 import uuid
+import zipfile
 from pathlib import Path
 from typing import Any
 
 from .collectors import (
-    collect_all,
     diagnostics,
     inventory_status,
+    LiveCollectorSet,
 )
 from .models import Experiment, Operation, aggregate_state, utc_now
-from .logs import LogSource, SOURCES, read_source
+from .logs import LogSource, SERVICE_DIAGNOSTICS, SOURCES, read_source
+from .redaction import redact, redact_payload
 from .runner import CommandRunner, IDENTITIES
 from .store import DashboardStore
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
-EXAMPLES = {
-    "init-test",
-    "qiskit-simple",
-    "ghz-qiskit",
-    "ghz-pennylane",
-    "pennylane",
-    "qaoa",
-    "qiskit-vqe",
-    "supermarq",
-    "chemistry",
-}
+_SAFE_CONSTRAINT = re.compile(r"^[A-Za-z0-9_.+*|&!\[\]-]+$")
+_MEMORY_SIZE = re.compile(r"^[1-9][0-9]*(?:[KMGTP])?$", re.IGNORECASE)
 EXAMPLE_SCRIPTS = {
     "init-test": "qfw_init_test.sh",
     "qiskit-simple": "qfw_qiskit_simple.sh",
@@ -48,14 +43,77 @@ EXAMPLE_SCRIPTS = {
     "supermarq": "qfw_supermarq.sh",
     "chemistry": "qfw_chem_app.sh",
 }
+EXAMPLE_PARAMETERS: dict[str, list[dict[str, Any]]] = {
+    "qiskit-simple": [{
+        "name": "qubits", "label": "Qubits", "type": "integer",
+        "default": 4, "minimum": 1, "maximum": 10000,
+        "help": "Number of qubits used by the circuit.",
+    }],
+    "ghz-qiskit": [
+        {
+            "name": "qubits", "label": "Qubits", "type": "integer",
+            "default": 4, "minimum": 1, "maximum": 10000,
+            "help": "Width of each GHZ circuit.",
+        },
+        {
+            "name": "iterations", "label": "Iterations", "type": "integer",
+            "default": 1, "minimum": 1, "maximum": 1000000,
+            "help": "Number of GHZ executions.",
+        },
+    ],
+    "ghz-pennylane": [
+        {
+            "name": "qubits", "label": "Qubits", "type": "integer",
+            "default": 4, "minimum": 1, "maximum": 10000,
+            "help": "Width of each GHZ circuit.",
+        },
+        {
+            "name": "iterations", "label": "Iterations", "type": "integer",
+            "default": 1, "minimum": 1, "maximum": 1000000,
+            "help": "Number of GHZ executions.",
+        },
+    ],
+    "qiskit-vqe": [{
+        "name": "optimizer_iterations", "label": "Optimizer iterations",
+        "type": "integer", "default": 1, "minimum": 1, "maximum": 1000000,
+        "help": "Maximum number of VQE optimizer iterations.",
+    }],
+    "supermarq": [
+        {
+            "name": "starting_qubits", "label": "Starting qubits",
+            "type": "integer", "default": 4, "minimum": 1, "maximum": 10000,
+            "help": "Starting circuit width for the benchmark.",
+        },
+        {
+            "name": "shots", "label": "Execution shots", "type": "integer",
+            "default": 16, "minimum": 1, "maximum": 65536,
+            "help": "Shots actually executed; this must not exceed Maximum shots.",
+        },
+    ],
+}
+EXAMPLES = set(EXAMPLE_SCRIPTS)
 
 
 class DashboardService:
     HOST_ACTIONS = {
         "cluster-build": ("./do_build.sh",),
+        "cluster-status": ("./do_ls.sh",),
+        "cluster-synchronize": (
+            "/bin/bash", "-lc",
+            "git pull --ff-only && git submodule sync --recursive "
+            "&& git submodule update --init --recursive",
+        ),
         "cluster-start": ("./do_startup.sh",),
         "cluster-stop": ("./do_stop.sh",),
         "cluster-restart": ("./do_restart.sh",),
+        "cluster-rebuild-incremental": (
+            "/bin/bash", "-lc",
+            "./do_build.sh && ./do_stop.sh && ./do_startup.sh",
+        ),
+        "cluster-rebuild-clean": (
+            "/bin/bash", "-lc",
+            "./do_build.sh --no-cache && ./do_stop.sh && ./do_startup.sh",
+        ),
         "cluster-recreate": (
             "/bin/bash", "-lc",
             "./do_stop.sh delete && ./do_build.sh && ./do_startup.sh",
@@ -67,11 +125,13 @@ class DashboardService:
     def __init__(self, cluster_root: Path, state_root: Path) -> None:
         self.cluster_root = cluster_root.resolve()
         self.runner = CommandRunner(self.cluster_root)
+        self.live_collectors = LiveCollectorSet(self.runner)
         self.store = DashboardStore(state_root / "qfw-slurm-cluster")
         self._threads: dict[str, threading.Thread] = {}
         self._processes: dict[str, subprocess.Popen[str]] = {}
         self._cancelled: set[str] = set()
         self._operation_lock = threading.Lock()
+        self._lifecycle_lock = threading.RLock()
         self._state_lock = threading.Lock()
         self._state_cache: dict[str, Any] | None = None
         self._state_cached_at = 0.0
@@ -83,34 +143,62 @@ class DashboardService:
             if self._state_cache is not None and now - self._state_cached_at < 2:
                 return self._state_cache
             self._refresh_experiments()
-            payload = aggregate_state(collect_all(self.runner))
+            payload = aggregate_state(self.live_collectors.snapshot())
             payload["operations"] = self.store.operations()
-            payload["experiments"] = self.store.experiments()
+            experiments = self.store.experiments()
+            payload["experiments"] = experiments
+            payload["running_experiments"] = self._running_experiments(
+                experiments,
+                payload.get("sources", {}).get("slurm", {}).get("records", []),
+            )
             payload["identities"] = list(IDENTITIES)
             payload["examples"] = self.examples()
             self._state_cache = payload
             self._state_cached_at = time.monotonic()
             return payload
 
+    def _running_experiments(
+        self,
+        experiments: list[dict[str, Any]],
+        slurm_records: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        live_job_ids = {
+            str(record.get("job_id", "")).split("+")[0]
+            for record in slurm_records
+            if record.get("kind") == "job" and record.get("job_id")
+        }
+        live_submissions = {
+            experiment_id
+            for experiment_id, thread in self._threads.items()
+            if getattr(thread, "is_alive", lambda: False)()
+        }
+        return [
+            experiment for experiment in experiments
+            if (
+                str(experiment.get("experiment_id", "")) in live_submissions
+                or (
+                    bool(experiment.get("slurm_job_id"))
+                    and str(experiment["slurm_job_id"]).split("+")[0]
+                    in live_job_ids
+                )
+            )
+        ]
+
     def examples(self) -> list[dict[str, Any]]:
         if self._examples_cache is not None:
             return self._examples_cache
-        directory = "/opt/openqse/qfw/share/qfw/examples"
-        records: list[dict[str, Any]] = []
-        for name, script in EXAMPLE_SCRIPTS.items():
-            result = self.runner.cluster(
-                "root", ("test", "-x", f"{directory}/{script}"), timeout=3
-            )
-            if result.returncode == 0:
-                records.append({
-                    "name": name,
-                    "script": script,
-                    "backends": ["nwqsim"] if name == "qiskit-vqe"
-                    else ["nwqsim", "iqm"],
-                    "hardware_risk": name != "init-test",
-                })
-        self._examples_cache = records
-        return records
+        self._examples_cache = [
+            {
+                "name": name,
+                "script": script,
+                "backends": ["nwqsim"] if name == "qiskit-vqe"
+                else ["nwqsim", "iqm"],
+                "hardware_risk": name != "init-test",
+                "parameters": EXAMPLE_PARAMETERS.get(name, []),
+            }
+            for name, script in EXAMPLE_SCRIPTS.items()
+        ]
+        return self._examples_cache
 
     def _refresh_experiments(self) -> None:
         terminal = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL"}
@@ -149,6 +237,16 @@ class DashboardService:
             slurm_state = values[1].split()[0].upper() if len(values) > 1 else ""
             if slurm_state and slurm_state not in terminal:
                 experiment.status = slurm_state.lower()
+                output_path = str(experiment.manifest.get("output_path", ""))
+                if output_path:
+                    output = self.runner.cluster(
+                        experiment.identity, ("tail", "-n", "1000", output_path)
+                    )
+                    if output.returncode == 0:
+                        experiment.result = {
+                            **experiment.result,
+                            "output_tail": output.stdout[-64000:],
+                        }
                 if experiment.status != previous_status:
                     experiment.timeline.append({
                         "timestamp": utc_now(), "phase": experiment.status,
@@ -319,6 +417,69 @@ class DashboardService:
     def diagnostic_state(self) -> dict[str, Any]:
         return {"schema": "qfw-dashboard-v1", **diagnostics(self.runner).payload()}
 
+    def clear_dashboard_state(self, identity: str) -> dict[str, Any]:
+        """Clear Dashboard-owned state after proving no tracked work is active."""
+        if identity != "root":
+            raise PermissionError("clearing Dashboard state requires root selection")
+
+        with self._lifecycle_lock:
+            active_threads = sorted(
+                identifier for identifier, thread in self._threads.items()
+                if getattr(thread, "is_alive", lambda: False)()
+            )
+            with self._operation_lock:
+                active_processes = sorted(
+                    identifier for identifier, process in self._processes.items()
+                    if process.poll() is None
+                )
+            if active_threads or active_processes:
+                identifiers = sorted(set(active_threads + active_processes))
+                raise RuntimeError(
+                    "cannot clear Dashboard state while managed work is active: "
+                    + ", ".join(identifiers)
+                )
+
+            tracked_job_ids = {
+                str(item.get("slurm_job_id", "")).split(";", 1)[0].split("+", 1)[0]
+                for item in self.store.experiments()
+                if item.get("slurm_job_id")
+            }
+            if tracked_job_ids:
+                result = self.runner.cluster(
+                    "root", ("squeue", "--noheader", "--format=%A")
+                )
+                if result.returncode:
+                    detail = result.stderr.strip() or result.stdout.strip()
+                    raise RuntimeError(
+                        "cannot verify whether tracked Slurm jobs are active"
+                        + (f": {detail}" if detail else "")
+                    )
+                active_job_ids = {
+                    line.strip().split("+", 1)[0]
+                    for line in result.stdout.splitlines()
+                    if line.strip()
+                }
+                active = sorted(tracked_job_ids & active_job_ids)
+                if active:
+                    raise RuntimeError(
+                        "cannot clear Dashboard state while tracked Slurm jobs "
+                        "are active: " + ", ".join(active)
+                    )
+
+            cleared = self.store.clear_dashboard_state()
+            self._threads.clear()
+            self._cancelled.clear()
+            with self._state_lock:
+                self._state_cache = None
+                self._state_cached_at = 0.0
+            self._examples_cache = None
+        return {
+            "schema": "qfw-dashboard-reset-v1",
+            "outcome": "success",
+            "timestamp": utc_now(),
+            "cleared": cleared,
+        }
+
     def submit_action(
         self,
         action: str,
@@ -376,15 +537,16 @@ class DashboardService:
             target=target,
             request_id=request_id,
         )
-        self.store.save_operation(operation)
-        thread = threading.Thread(
-            target=self._run_operation,
-            args=(operation, argv, container),
-            daemon=True,
-            name=f"qfw-dashboard-{operation.operation_id}",
-        )
-        self._threads[operation.operation_id] = thread
-        thread.start()
+        with self._lifecycle_lock:
+            self.store.save_operation(operation)
+            thread = threading.Thread(
+                target=self._run_operation,
+                args=(operation, argv, container),
+                daemon=True,
+                name=f"qfw-dashboard-{operation.operation_id}",
+            )
+            self._threads[operation.operation_id] = thread
+            thread.start()
         return operation
 
     def _run_operation(
@@ -511,68 +673,19 @@ class DashboardService:
         return operation
 
     def submit_experiment(self, request: dict[str, Any]) -> Experiment:
-        identity = str(request.get("identity", ""))
-        backend = str(request.get("backend", ""))
-        example = str(request.get("example", ""))
-        mode = str(request.get("allocation_mode", "normal"))
-        if identity not in IDENTITIES:
-            raise ValueError("unsupported identity")
-        if backend not in {"nwqsim", "iqm"}:
-            raise ValueError("backend must be nwqsim or iqm")
-        if example not in EXAMPLES:
-            raise ValueError("unsupported QFw example")
-        if mode not in {"normal", "heterogeneous"}:
-            raise ValueError("invalid allocation mode")
-        if backend == "iqm" and request.get("submit_real_hardware") is not True:
-            raise PermissionError("real IQM submission requires explicit confirmation")
-        shots = int(request.get("shots", 16))
-        if shots < 1 or shots > (256 if backend == "iqm" else 65536):
-            raise ValueError("shots outside permitted range")
-        nodes = int(request.get("nodes", 1))
-        if nodes < 1 or nodes > 8:
-            raise ValueError("nodes outside permitted range")
-        tasks = self._bounded(request, "tasks", nodes, 1, 128)
-        launcher_nodes = self._bounded(request, "launcher_nodes", 1, 1, 8)
-        launcher_tasks = self._bounded(
-            request, "launcher_tasks", launcher_nodes, 1, 128
+        identity, backend, example, mode, requirements = (
+            self._validated_experiment_request(
+                request, default_identity="", require_hardware_confirmation=True
+            )
         )
-        time_minutes = int(request.get("time_minutes", 15 if backend == "iqm" else 45))
-        maximum_minutes = 15 if backend == "iqm" else 240
-        if time_minutes < 1 or time_minutes > maximum_minutes:
-            raise ValueError("time_minutes outside permitted range")
-        chemistry_app = str(request.get("chemistry_app", ""))
-        if example == "chemistry":
-            if not chemistry_app.startswith("/workspace/") or "\n" in chemistry_app:
-                raise ValueError("chemistry requires an absolute /workspace application path")
-        requirements = {
-            "circ_count": self._bounded(request, "circ_count", 1, 1, 1000000),
-            "max_qubits": self._bounded(request, "max_qubits", 5, 1, 10000),
-            "max_depth": self._bounded(request, "max_depth", 100, 1, 10000000),
-            "max_one_q_gates": self._bounded(
-                request, "max_one_q_gates", 0, 0, 100000000
-            ),
-            "max_two_q_gates": self._bounded(
-                request, "max_two_q_gates", 0, 0, 100000000
-            ),
-            "max_measurements": self._bounded(
-                request, "max_measurements", 0, 0, 100000000
-            ),
-            "workload_kind": str(request.get("workload_kind", "quantum")),
-            "shots": shots,
-            "nodes": nodes,
-            "tasks": tasks,
-            "launcher_nodes": launcher_nodes,
-            "launcher_tasks": launcher_tasks,
-            "partition": self._optional_name(request, "partition", "normal"),
-            "account": self._optional_name(request, "account"),
-            "qos": self._optional_name(request, "qos"),
-            "time_minutes": time_minutes,
-            "chemistry_app": chemistry_app,
-        }
-        if requirements["workload_kind"] not in {"quantum", "hybrid"}:
-            raise ValueError("workload_kind must be quantum or hybrid")
+        experiment_id = self._experiment_id(request)
+        if any(
+            item.get("experiment_id") == experiment_id
+            for item in self.store.experiments()
+        ):
+            raise ValueError(f"experiment already exists: {experiment_id}")
         experiment = Experiment(
-            experiment_id=str(uuid.uuid4()),
+            experiment_id=experiment_id,
             identity=identity,
             backend=backend,
             example=example,
@@ -601,25 +714,107 @@ class DashboardService:
                 "component": "dashboard",
             }],
         )
-        self.store.save_experiment(experiment)
-        self.store.audit({
-            "identity": identity,
-            "host_identity": "electroboy-service",
-            "action": "experiment-submit",
-            "target": backend,
-            "request_id": experiment.experiment_id,
-            "hardware": backend == "iqm",
-            "outcome": "accepted",
-        })
-        thread = threading.Thread(
-            target=self._run_experiment,
-            args=(experiment, requirements),
-            daemon=True,
-            name=f"qfw-experiment-{experiment.experiment_id}",
-        )
-        self._threads[experiment.experiment_id] = thread
-        thread.start()
+        with self._lifecycle_lock:
+            self.store.save_experiment(experiment)
+            self.store.audit({
+                "identity": identity,
+                "host_identity": "electroboy-service",
+                "action": "experiment-submit",
+                "target": backend,
+                "request_id": experiment.experiment_id,
+                "hardware": backend == "iqm",
+                "outcome": "accepted",
+            })
+            thread = threading.Thread(
+                target=self._run_experiment,
+                args=(experiment, requirements),
+                daemon=True,
+                name=f"qfw-experiment-{experiment.experiment_id}",
+            )
+            self._threads[experiment.experiment_id] = thread
+            thread.start()
         return experiment
+
+    def _validated_experiment_request(
+        self,
+        request: dict[str, Any],
+        *,
+        default_identity: str,
+        require_hardware_confirmation: bool,
+    ) -> tuple[str, str, str, str, dict[str, Any]]:
+        identity = str(request.get("identity", default_identity))
+        backend = str(request.get("backend", ""))
+        application_source, example, application_path = self._application(request)
+        application_parameters = self._application_parameters(
+            request, application_source, example
+        )
+        mode = str(request.get("allocation_mode", "normal"))
+        if identity not in IDENTITIES:
+            raise ValueError("unsupported identity")
+        if backend not in {"nwqsim", "iqm"}:
+            raise ValueError("backend must be nwqsim or iqm")
+        if mode not in {"normal", "heterogeneous"}:
+            raise ValueError("invalid allocation mode")
+        partition = self._optional_name(request, "partition", "normal")
+        if partition == "heterogeneous":
+            raise ValueError(
+                "heterogeneous is an allocation mode, not a Slurm partition; "
+                "use the normal partition"
+            )
+        if partition == "qfw-services":
+            raise ValueError("qfw-services is reserved for site-owned services")
+        if (
+            require_hardware_confirmation
+            and backend == "iqm"
+            and request.get("submit_real_hardware") is not True
+        ):
+            raise PermissionError("real IQM submission requires explicit confirmation")
+        shots = int(request.get("shots", 16))
+        if shots < 1 or shots > (256 if backend == "iqm" else 65536):
+            raise ValueError("shots outside permitted range")
+        nodes = int(request.get("nodes", 1))
+        if nodes < 1 or nodes > 8:
+            raise ValueError("nodes outside permitted range")
+        classical = self._classical_requirements(request, nodes)
+        service_nodes = self._bounded(request, "service_nodes", 1, 1, 8)
+        service_tasks = self._bounded(
+            request, "service_tasks", service_nodes, 1, 128
+        )
+        time_minutes = int(request.get("time_minutes", 15 if backend == "iqm" else 45))
+        maximum_minutes = 15 if backend == "iqm" else 240
+        if time_minutes < 1 or time_minutes > maximum_minutes:
+            raise ValueError("time_minutes outside permitted range")
+        requirements = {
+            "circ_count": self._bounded(request, "circ_count", 1, 1, 1000000),
+            "max_qubits": self._bounded(request, "max_qubits", 5, 1, 10000),
+            "max_depth": self._bounded(request, "max_depth", 100, 1, 10000000),
+            "max_one_q_gates": self._bounded(
+                request, "max_one_q_gates", 0, 0, 100000000
+            ),
+            "max_two_q_gates": self._bounded(
+                request, "max_two_q_gates", 0, 0, 100000000
+            ),
+            "max_measurements": self._bounded(
+                request, "max_measurements", 0, 0, 100000000
+            ),
+            "workload_kind": str(request.get("workload_kind", "quantum")),
+            "shots": shots,
+            "nodes": nodes,
+            **classical,
+            "service_nodes": service_nodes,
+            "service_tasks": service_tasks,
+            "partition": partition,
+            "account": self._optional_name(request, "account"),
+            "qos": self._optional_name(request, "qos"),
+            "time_minutes": time_minutes,
+            "application_source": application_source,
+            "application_path": application_path,
+            "application_parameters": application_parameters,
+        }
+        self._validate_application_capacity(example, requirements)
+        if requirements["workload_kind"] not in {"quantum", "hybrid"}:
+            raise ValueError("workload_kind must be quantum or hybrid")
+        return identity, backend, example, mode, requirements
 
     def _revision(self, path: Path) -> str:
         result = self.runner.host(("git", "-C", str(path), "rev-parse", "HEAD"))
@@ -639,9 +834,179 @@ class DashboardService:
         request: dict[str, Any], name: str, default: str = ""
     ) -> str:
         value = str(request.get(name, default)).strip()
+        if not value:
+            value = default
         if value and not _SAFE_NAME.fullmatch(value):
             raise ValueError(f"invalid {name}")
         return value
+
+    @staticmethod
+    def _experiment_id(request: dict[str, Any]) -> str:
+        supplied = str(request.get("experiment_id", "")).strip()
+        if not supplied:
+            return str(uuid.uuid4())
+        try:
+            parsed = uuid.UUID(supplied)
+        except ValueError as error:
+            raise ValueError("experiment_id must be a UUID") from error
+        if str(parsed) != supplied.lower():
+            raise ValueError("experiment_id must use canonical UUID syntax")
+        return str(parsed)
+
+    @staticmethod
+    def _application(request: dict[str, Any]) -> tuple[str, str, str]:
+        source = str(request.get("application_source", "example"))
+        if source not in {"example", "path"}:
+            raise ValueError("application_source must be example or path")
+        example = str(request.get("example", "qiskit-simple"))
+        path = str(request.get("application_path", "")).strip()
+        if path and (
+            not path.startswith("/workspace/")
+            or ".." in Path(path).parts
+            or "\n" in path
+            or "\x00" in path
+        ):
+            raise ValueError("application path must be an absolute /workspace path")
+        if source == "path":
+            if not path:
+                raise ValueError("custom application path is required")
+            return source, "custom", path
+        if example not in EXAMPLES:
+            raise ValueError("unsupported QFw example")
+        if example == "chemistry" and not path:
+            raise ValueError("chemistry requires an absolute /workspace application path")
+        return source, example, path
+
+    @staticmethod
+    def _application_parameters(
+        request: dict[str, Any], source: str, example: str
+    ) -> dict[str, Any]:
+        raw = request.get("application_parameters", {})
+        if raw is None:
+            raw = {}
+        if not isinstance(raw, dict):
+            raise ValueError("application_parameters must be an object")
+        if source == "path":
+            if raw:
+                raise ValueError(
+                    "custom application runtime parameters are not yet supported"
+                )
+            return {}
+        definitions = EXAMPLE_PARAMETERS.get(example, [])
+        known = {definition["name"] for definition in definitions}
+        unknown = set(raw) - known
+        if unknown:
+            raise ValueError(
+                f"unsupported {example} runtime parameter: {sorted(unknown)[0]}"
+            )
+        parameters: dict[str, Any] = {}
+        for definition in definitions:
+            name = str(definition["name"])
+            value = raw.get(name, definition["default"])
+            if definition["type"] == "integer":
+                try:
+                    value = int(value)
+                except (TypeError, ValueError) as error:
+                    raise ValueError(f"{name} must be an integer") from error
+                minimum = int(definition["minimum"])
+                maximum = int(definition["maximum"])
+                if value < minimum or value > maximum:
+                    raise ValueError(f"{name} outside permitted range")
+            parameters[name] = value
+        return parameters
+
+    @staticmethod
+    def _validate_application_capacity(
+        example: str, requirements: dict[str, Any]
+    ) -> None:
+        parameters = requirements["application_parameters"]
+        qubits = parameters.get("qubits", parameters.get("starting_qubits"))
+        if qubits is not None and qubits > requirements["max_qubits"]:
+            raise ValueError("application qubits exceed Maximum qubits")
+        if parameters.get("shots", 0) > requirements["shots"]:
+            raise ValueError("application shots exceed Maximum shots")
+        if example.startswith("ghz-") and (
+            parameters.get("iterations", 1) > requirements["circ_count"]
+        ):
+            raise ValueError("application iterations exceed Circuit count")
+
+    @staticmethod
+    def _application_environment(
+        example: str, parameters: dict[str, Any]
+    ) -> dict[str, str]:
+        environment: dict[str, str] = {}
+        if example in {"qiskit-simple", "ghz-qiskit", "ghz-pennylane"}:
+            environment["QFW_RUN_ALL_QUBITS"] = str(parameters["qubits"])
+        elif example == "supermarq":
+            environment["QFW_RUN_ALL_QUBITS"] = str(parameters["starting_qubits"])
+            environment["QFW_RUN_ALL_SHOTS"] = str(parameters["shots"])
+        if example in {"ghz-qiskit", "ghz-pennylane"}:
+            environment["QFW_RUN_ALL_ITERS"] = str(parameters["iterations"])
+        elif example == "qiskit-vqe":
+            environment["QFW_RUN_ALL_VQE_ITERS"] = str(
+                parameters["optimizer_iterations"]
+            )
+        return environment
+
+    def _classical_requirements(
+        self, request: dict[str, Any], nodes: int
+    ) -> dict[str, Any]:
+        requirements: dict[str, Any] = {
+            "tasks": self._bounded(request, "tasks", nodes, 1, 128),
+        }
+        for name, maximum in (
+            ("tasks_per_node", 128),
+            ("cpus_per_task", 256),
+            ("gpus", 64),
+        ):
+            if name in request and request[name] not in {None, ""}:
+                requirements[name] = self._bounded(request, name, 1, 1, maximum)
+        memory = str(request.get("memory", "")).strip()
+        if memory:
+            if not _MEMORY_SIZE.fullmatch(memory):
+                raise ValueError("invalid memory size")
+            memory_scope = str(request.get("memory_scope", "node"))
+            if memory_scope not in {"node", "cpu"}:
+                raise ValueError("memory_scope must be node or cpu")
+            requirements["memory"] = memory.upper()
+            requirements["memory_scope"] = memory_scope
+        if "gpus" in requirements:
+            gpu_scope = str(request.get("gpus_scope", "node"))
+            if gpu_scope not in {"node", "task"}:
+                raise ValueError("gpus_scope must be node or task")
+            requirements["gpus_scope"] = gpu_scope
+        constraint = str(request.get("constraint", "")).strip()
+        if constraint:
+            if len(constraint) > 128 or not _SAFE_CONSTRAINT.fullmatch(constraint):
+                raise ValueError("invalid constraint")
+            requirements["constraint"] = constraint
+        if "exclusive" in request:
+            if not isinstance(request["exclusive"], bool):
+                raise ValueError("exclusive must be boolean")
+            requirements["exclusive"] = request["exclusive"]
+        return requirements
+
+    @staticmethod
+    def _classical_options(requirements: dict[str, Any]) -> list[str]:
+        options: list[str] = []
+        option_names = {
+            "tasks_per_node": "ntasks-per-node",
+            "cpus_per_task": "cpus-per-task",
+        }
+        for name, option in option_names.items():
+            if name in requirements:
+                options.append(f"--{option}={requirements[name]}")
+        if "memory" in requirements:
+            option = "mem" if requirements["memory_scope"] == "node" else "mem-per-cpu"
+            options.append(f"--{option}={requirements['memory']}")
+        if "gpus" in requirements:
+            option = "gpus-per-node" if requirements["gpus_scope"] == "node" else "gpus-per-task"
+            options.append(f"--{option}={requirements['gpus']}")
+        if "constraint" in requirements:
+            options.append(f"--constraint={requirements['constraint']}")
+        if requirements.get("exclusive") is True:
+            options.append("--exclusive")
+        return options
 
     def _run_experiment(
         self, experiment: Experiment, requirements: dict[str, Any]
@@ -652,92 +1017,47 @@ class DashboardService:
             "component": "slurm",
         })
         self.store.save_experiment(experiment)
-        shared_allocation = [f"--partition={requirements['partition']}"]
-        for name in ("account", "qos"):
-            if requirements[name]:
-                shared_allocation.append(f"--{name}={requirements[name]}")
-        application_allocation = [
-            *shared_allocation,
-            f"--nodes={requirements['nodes']}",
-            f"--ntasks={requirements['tasks']}",
-        ]
-        if experiment.allocation_mode == "normal":
-            allocation_args = application_allocation
-        else:
-            allocation_args = [
-                *shared_allocation,
-                f"--nodes={requirements['launcher_nodes']}",
-                f"--ntasks={requirements['launcher_tasks']}",
-                ":",
-                *application_allocation,
-            ]
-        qpu = "nwqsim" if experiment.backend == "nwqsim" else "ornl-iqm-20q"
-        quantum_fields = [
-            f"--qpu={qpu}",
-            f"--workload-kind={requirements['workload_kind']}",
-            f"--circ-count={requirements['circ_count']}",
-            f"--max-qubits={requirements['max_qubits']}",
-            f"--max-depth={requirements['max_depth']}",
-            f"--max-shots={requirements['shots']}",
-        ]
-        for name in ("max_one_q_gates", "max_two_q_gates", "max_measurements"):
-            if requirements[name]:
-                quantum_fields.append(f"--{name.replace('_', '-')}={requirements[name]}")
-        quantum_options = " ".join(quantum_fields)
-        chemistry_environment = ""
-        if experiment.example == "chemistry":
-            chemistry_app = str(requirements["chemistry_app"])
-            chemistry_environment = (
-                f"QFW_CHEM_APP_DIR={shlex.quote(str(Path(chemistry_app).parent))} "
-                f"QFW_RUN_ALL_CHEM_APP={shlex.quote(chemistry_app)} "
-            )
-        script = (
-            "set -euo pipefail; "
-            "export QFW_SHARED_ROOT=/workspace/qfw-container-base; "
-            "export QFW_RUN_BASE_DIR=${HOME}/qfw-runs; "
-            "mkdir -p ${QFW_RUN_BASE_DIR}; "
-            "source /opt/openqse/qfw/bin/qfw-activate "
-            "--venv /opt/openqse/qfw-venv; "
-            "cd ${QFW_SHARE_DIR}/examples; "
-            f"{chemistry_environment}QFW_RUN_ALL_TESTS={experiment.example} "
-            f"QFW_RUN_ALL_SHOTS={requirements['shots']} ./qfw_run_all.sh "
-            f"--service-mode site --backend {experiment.backend}; "
-            "qfw-deactivate"
+        experiment_root = (
+            f"/workspace/home/{experiment.identity}/qfw-dashboard/experiments/"
+            f"{experiment.experiment_id}"
         )
-        output_path = (
-            f"/workspace/home/{experiment.identity}/"
-            f"qfw-{experiment.experiment_id}.out"
-        )
-        argv = (
-            "sbatch", "--parsable", *shlex.split(quantum_options),
-            *allocation_args, f"--job-name=qfw-{experiment.example}",
-            f"--time={requirements['time_minutes']}",
-            f"--output={output_path}",
-            f"--wrap={shlex.join(('bash', '-lc', script))}",
-        )
-        experiment.manifest["command"] = shlex.join(argv)
+        batch_path = f"{experiment_root}/job.sbatch"
+        output_path = f"{experiment_root}/job.out"
+        batch_script = self._batch_script(experiment, requirements, output_path)
+        submit_argv = ("sbatch", "--parsable", batch_path)
+        experiment.manifest["command"] = shlex.join(submit_argv)
+        experiment.manifest["batch_script_path"] = batch_path
+        experiment.manifest["batch_script_sha256"] = hashlib.sha256(
+            batch_script.encode("utf-8")
+        ).hexdigest()
         experiment.manifest["output_path"] = output_path
         experiment.manifest["submitted_at"] = utc_now()
-        result = self.runner.cluster(
-            experiment.identity, argv, timeout=30
+        write_result = self._write_batch_script(
+            experiment.identity, batch_path, batch_script
         )
+        if write_result.returncode:
+            result = write_result
+            failure_classification = "batch-script"
+        else:
+            result = self.runner.cluster(
+                experiment.identity, submit_argv, timeout=30
+            )
+            failure_classification = "submission"
         if result.returncode:
             experiment.status = "failed"
             experiment.result = {
-                "failure_classification": "submission",
+                "failure_classification": failure_classification,
                 "error": result.stderr or result.stdout,
             }
             experiment.completed_at = utc_now()
             experiment.timeline.append({
                 "timestamp": experiment.completed_at, "phase": "failed",
-                "component": "slurm", "classification": "submission",
+                "component": "slurm", "classification": failure_classification,
             })
         else:
             experiment.slurm_job_id = result.stdout.strip().split(";")[0]
             experiment.status = "submitted"
-            experiment.artifacts = [
-                output_path
-            ]
+            experiment.artifacts = [output_path, batch_path]
             experiment.timeline.append({
                 "timestamp": utc_now(), "phase": "submitted",
                 "component": "slurm", "job_id": experiment.slurm_job_id,
@@ -752,6 +1072,132 @@ class DashboardService:
             "severity": "error" if result.returncode else "info",
             "message": experiment.status,
         })
+
+    def _batch_script(
+        self,
+        experiment: Experiment,
+        requirements: dict[str, Any],
+        output_path: str,
+    ) -> str:
+        qpu = "nwqsim" if experiment.backend == "nwqsim" else "ornl-iqm-20q"
+        quantum_fields = [
+            f"--qpu={qpu}",
+            f"--workload-kind={requirements['workload_kind']}",
+            f"--circ-count={requirements['circ_count']}",
+            f"--max-qubits={requirements['max_qubits']}",
+            f"--max-depth={requirements['max_depth']}",
+            f"--max-shots={requirements['shots']}",
+        ]
+        for name in ("max_one_q_gates", "max_two_q_gates", "max_measurements"):
+            if requirements[name]:
+                quantum_fields.append(
+                    f"--{name.replace('_', '-')}={requirements[name]}"
+                )
+        shared_allocation = [f"--partition={requirements['partition']}"]
+        for name in ("account", "qos"):
+            if requirements[name]:
+                shared_allocation.append(f"--{name}={requirements[name]}")
+        application_allocation = [
+            *shared_allocation,
+            f"--nodes={requirements['nodes']}",
+            f"--ntasks={requirements['tasks']}",
+            *self._classical_options(requirements),
+        ]
+        common_directives = [
+            *quantum_fields,
+            f"--job-name=qfw-{experiment.example}",
+            f"--time={requirements['time_minutes']}",
+            f"--output={output_path}",
+        ]
+        if experiment.allocation_mode == "normal":
+            directive_groups = [[*common_directives, *application_allocation]]
+        else:
+            service_allocation = [
+                *shared_allocation,
+                f"--nodes={requirements['service_nodes']}",
+                f"--ntasks={requirements['service_tasks']}",
+            ]
+            directive_groups = [
+                [*common_directives, *application_allocation],
+                [f"--time={requirements['time_minutes']}", *service_allocation],
+            ]
+        directives: list[str] = []
+        for index, group in enumerate(directive_groups):
+            if index:
+                directives.append("#SBATCH hetjob")
+            directives.extend(f"#SBATCH {option}" for option in group)
+
+        body = [
+            "",
+            "set -euo pipefail",
+            "export QFW_SHARED_ROOT=/workspace/qfw-container-base",
+            'export QFW_RUN_BASE_DIR="${HOME}/qfw-runs"',
+            'mkdir -p "${QFW_RUN_BASE_DIR}"',
+            "source /opt/openqse/qfw/bin/qfw-activate \\",
+            "    --venv /opt/openqse/qfw-venv",
+            "qfw_dashboard_deactivate() {",
+            "    type qfw-deactivate >/dev/null 2>&1 && qfw-deactivate || true",
+            "}",
+            "trap qfw_dashboard_deactivate EXIT",
+        ]
+        if requirements["application_source"] == "path":
+            application_path = str(requirements["application_path"])
+            if application_path.endswith(".py"):
+                application_command = shlex.join(("python3", application_path))
+            elif application_path.endswith(".sh"):
+                application_command = shlex.join(("bash", application_path))
+            else:
+                application_command = shlex.quote(application_path)
+            body.extend((
+                f"cd {shlex.quote(str(Path(application_path).parent))}",
+                application_command,
+            ))
+        else:
+            runtime_environment = self._application_environment(
+                experiment.example, requirements["application_parameters"]
+            )
+            if experiment.example == "chemistry":
+                chemistry_app = str(requirements["application_path"])
+                runtime_environment.update({
+                    "QFW_CHEM_APP_DIR": str(Path(chemistry_app).parent),
+                    "QFW_RUN_ALL_CHEM_APP": chemistry_app,
+                })
+            body.extend((
+                'cd "${QFW_SHARE_DIR}/examples"',
+                shlex.join((
+                    "env",
+                    *(f"{name}={value}" for name, value in runtime_environment.items()),
+                    f"QFW_RUN_ALL_TESTS={experiment.example}",
+                    "./qfw_run_all.sh",
+                    "--service-mode", "site",
+                    "--backend", experiment.backend,
+                )),
+            ))
+        return "\n".join((
+            "#!/usr/bin/env bash",
+            *directives,
+            *body,
+            "",
+        ))
+
+    def _write_batch_script(
+        self,
+        identity: str,
+        batch_path: str,
+        batch_script: str,
+    ) -> CommandResult:
+        encoded = base64.b64encode(batch_script.encode("utf-8")).decode("ascii")
+        writer = (
+            "import base64, os, pathlib, sys; "
+            "path = pathlib.Path(sys.argv[1]); "
+            "path.parent.mkdir(parents=True, exist_ok=True); "
+            "temporary = path.with_suffix(path.suffix + '.new'); "
+            "temporary.write_bytes(base64.b64decode(sys.argv[2], validate=True)); "
+            "os.chmod(temporary, 0o700); temporary.replace(path)"
+        )
+        return self.runner.cluster(
+            identity, ("python3", "-c", writer, batch_path, encoded), timeout=15
+        )
 
     def cancel_experiment(self, experiment_id: str, identity: str) -> None:
         matches = [
@@ -803,29 +1249,6 @@ class DashboardService:
         }
         return self.submit_experiment(request)
 
-    def compare_results(
-        self, experiment_ids: list[str], identity: str
-    ) -> dict[str, Any]:
-        if len(experiment_ids) != 2 or experiment_ids[0] == experiment_ids[1]:
-            raise ValueError("comparison requires two different experiments")
-        records = [self._owned_experiment(item, identity) for item in experiment_ids]
-        signatures = [
-            (record.get("backend"), record.get("example")) for record in records
-        ]
-        if signatures[0] != signatures[1]:
-            raise ValueError("experiments must use the same backend and example")
-        metrics = [self._result_metrics(record) for record in records]
-        keys = sorted(set(metrics[0]) | set(metrics[1]))
-        return {
-            "schema": "qfw-dashboard-comparison-v1",
-            "experiments": experiment_ids,
-            "signature": {"backend": signatures[0][0], "example": signatures[0][1]},
-            "metrics": [
-                {"name": key, "left": metrics[0].get(key), "right": metrics[1].get(key)}
-                for key in keys
-            ],
-        }
-
     def _owned_experiment(self, experiment_id: str, identity: str) -> dict[str, Any]:
         if identity not in IDENTITIES:
             raise ValueError("unsupported identity")
@@ -838,15 +1261,6 @@ class DashboardService:
         if identity != "root" and match.get("identity") != identity:
             raise PermissionError("experiment is owned by another identity")
         return match
-
-    @staticmethod
-    def _result_metrics(experiment: dict[str, Any]) -> dict[str, Any]:
-        records = experiment.get("result", {}).get("records", [])
-        example = next((
-            item for item in records if item.get("kind") == "example"
-        ), {})
-        metrics = example.get("metrics", {})
-        return metrics if isinstance(metrics, dict) else {}
 
     def shell_context(self, identity: str, target: str) -> dict[str, str]:
         if identity not in IDENTITIES:
@@ -928,22 +1342,7 @@ class DashboardService:
         path = str(artifacts[index])
         if not path.startswith(f"/workspace/home/{owner}/"):
             raise PermissionError("artifact is outside the experiment home")
-        reader = (
-            "import base64, pathlib, sys; "
-            "p=pathlib.Path(sys.argv[1]); "
-            "data=p.read_bytes(); "
-            "assert len(data) <= 8388608, 'artifact exceeds 8 MiB'; "
-            "print(base64.b64encode(data).decode('ascii'))"
-        )
-        result = self.runner.cluster(
-            owner, ("python3", "-c", reader, path), timeout=15
-        )
-        if result.returncode:
-            raise RuntimeError(result.stderr or result.stdout)
-        try:
-            data = base64.b64decode(result.stdout.strip(), validate=True)
-        except ValueError as error:
-            raise RuntimeError("artifact reader returned invalid data") from error
+        data = self._read_artifact(owner, path)
         return {
             "schema": "qfw-dashboard-artifact-v1",
             "experiment_id": experiment_id,
@@ -954,62 +1353,152 @@ class DashboardService:
             "content_base64": base64.b64encode(data).decode("ascii"),
         }
 
-    def command_preview(self, request: dict[str, Any]) -> str:
-        identity = str(request.get("identity", "user-a"))
-        backend = str(request.get("backend", "nwqsim"))
-        mode = str(request.get("allocation_mode", "normal"))
-        nodes = int(request.get("nodes", 1))
-        if identity not in IDENTITIES:
-            raise ValueError("unsupported identity")
-        if backend not in {"nwqsim", "iqm"}:
-            raise ValueError("backend must be nwqsim or iqm")
-        if mode not in {"normal", "heterogeneous"}:
-            raise ValueError("invalid allocation mode")
-        if nodes < 1 or nodes > 8:
-            raise ValueError("nodes outside permitted range")
-        tasks = self._bounded(request, "tasks", nodes, 1, 128)
-        launcher_nodes = self._bounded(request, "launcher_nodes", 1, 1, 8)
-        launcher_tasks = self._bounded(
-            request, "launcher_tasks", launcher_nodes, 1, 128
-        )
-        shots = self._bounded(
-            request, "shots", 16, 1, 256 if backend == "iqm" else 65536
-        )
-        time_minutes = self._bounded(
-            request, "time_minutes", 15 if backend == "iqm" else 45,
-            1, 15 if backend == "iqm" else 240,
-        )
-        workload = str(request.get("workload_kind", "quantum"))
-        if workload not in {"quantum", "hybrid"}:
-            raise ValueError("workload_kind must be quantum or hybrid")
-        quantum = [
-            f"--qpu={'nwqsim' if backend == 'nwqsim' else 'ornl-iqm-20q'}",
-            f"--workload-kind={workload}",
-            f"--circ-count={self._bounded(request, 'circ_count', 1, 1, 1000000)}",
-            f"--max-qubits={self._bounded(request, 'max_qubits', 5, 1, 10000)}",
-            f"--max-depth={self._bounded(request, 'max_depth', 100, 1, 10000000)}",
-            f"--max-shots={shots}",
+    def experiment_archive(
+        self, experiment_id: str, identity: str
+    ) -> dict[str, Any]:
+        experiment = self._owned_experiment(experiment_id, identity)
+        owner = str(experiment.get("identity"))
+        prefix = f"/workspace/home/{owner}/"
+        missing: list[str] = []
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(
+            archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
+            archive.writestr(
+                "experiment.json",
+                json.dumps(experiment, indent=2, sort_keys=True) + "\n",
+            )
+            for index, artifact_path in enumerate(experiment.get("artifacts", [])):
+                path = str(artifact_path)
+                if not path.startswith(prefix):
+                    missing.append(f"{path}: outside experiment home")
+                    continue
+                try:
+                    data = self._read_artifact(owner, path)
+                except RuntimeError as error:
+                    missing.append(f"{path}: {error}")
+                    continue
+                name = f"artifacts/{index:02d}-{Path(path).name}"
+                archive.writestr(name, data)
+            if missing:
+                archive.writestr("missing-artifacts.txt", "\n".join(missing) + "\n")
+        data = archive_buffer.getvalue()
+        name = f"qfw-experiment-{experiment_id}.zip"
+        return {
+            "schema": "qfw-dashboard-experiment-archive-v1",
+            "experiment_id": experiment_id,
+            "identity": owner,
+            "name": name,
+            "mime_type": "application/zip",
+            "size": len(data),
+            "content_base64": base64.b64encode(data).decode("ascii"),
+        }
+
+    def service_archive(self, service_id: str, identity: str) -> dict[str, Any]:
+        if identity != "root":
+            raise PermissionError("service diagnostics require root selection")
+        files = SERVICE_DIAGNOSTICS.get(service_id)
+        if files is None:
+            raise KeyError(f"unknown service: {service_id}")
+        state = self.state()
+        records = [
+            record
+            for source_name in ("services", "service-plane")
+            for record in state.get("sources", {}).get(source_name, {}).get(
+                "records", []
+            )
+            if record.get("service_id") == service_id
         ]
-        for name in ("max_one_q_gates", "max_two_q_gates", "max_measurements"):
-            value = self._bounded(request, name, 0, 0, 100000000)
-            if value:
-                quantum.append(f"--{name.replace('_', '-')}={value}")
-        partition = self._optional_name(request, "partition", "normal")
-        shared = [f"--partition={partition}"]
-        for name in ("account", "qos"):
-            value = self._optional_name(request, name)
-            if value:
-                shared.append(f"--{name}={value}")
-        classical = [*shared, f"--nodes={nodes}", f"--ntasks={tasks}"]
-        if mode == "heterogeneous":
-            classical = [
-                *shared,
-                f"--nodes={launcher_nodes}",
-                f"--ntasks={launcher_tasks}",
-                ":",
-                *classical,
-            ]
-        return shlex.join((
-            "sbatch", *quantum, *classical, f"--time={time_minutes}",
-            "--wrap=bash -lc '<QFw activation and example command>'",
-        )) + f" # identity={identity}"
+        missing: list[str] = []
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(
+            archive_buffer, mode="w", compression=zipfile.ZIP_DEFLATED
+        ) as archive:
+            archive.writestr(
+                "service-status.json",
+                json.dumps(redact_payload({
+                    "service_id": service_id,
+                    "captured_at": utc_now(),
+                    "records": records,
+                }), indent=2, sort_keys=True) + "\n",
+            )
+            for diagnostic in files:
+                try:
+                    data = self._read_cluster_file(
+                        "root", diagnostic.container, diagnostic.path
+                    )
+                except RuntimeError as error:
+                    missing.append(f"{diagnostic.path}: {error}")
+                    continue
+                archive.writestr(
+                    diagnostic.name,
+                    redact(data.decode("utf-8", "replace")).encode("utf-8"),
+                )
+            if missing:
+                archive.writestr("missing-files.txt", "\n".join(missing) + "\n")
+        data = archive_buffer.getvalue()
+        return {
+            "schema": "qfw-dashboard-service-archive-v1",
+            "service_id": service_id,
+            "identity": identity,
+            "name": f"qfw-service-{service_id}-diagnostics.zip",
+            "mime_type": "application/zip",
+            "size": len(data),
+            "content_base64": base64.b64encode(data).decode("ascii"),
+        }
+
+    def _read_artifact(self, owner: str, path: str) -> bytes:
+        return self._read_cluster_file(owner, "slurmctld", path)
+
+    def _read_cluster_file(self, identity: str, container: str, path: str) -> bytes:
+        reader = (
+            "import base64, pathlib, sys; "
+            "p=pathlib.Path(sys.argv[1]); "
+            "data=p.read_bytes(); "
+            "assert len(data) <= 8388608, 'artifact exceeds 8 MiB'; "
+            "print(base64.b64encode(data).decode('ascii'))"
+        )
+        result = self.runner.cluster(
+            identity, ("python3", "-c", reader, path),
+            container=container, timeout=15,
+        )
+        if result.returncode:
+            raise RuntimeError(result.stderr or result.stdout)
+        try:
+            data = base64.b64decode(result.stdout.strip(), validate=True)
+        except ValueError as error:
+            raise RuntimeError("artifact reader returned invalid data") from error
+        return data
+
+    def preview_experiment(self, request: dict[str, Any]) -> dict[str, str]:
+        experiment_id = self._experiment_id(request)
+        preview_request = {**request, "experiment_id": experiment_id}
+        return {
+            "experiment_id": experiment_id,
+            "command": self.command_preview(preview_request),
+        }
+
+    def command_preview(self, request: dict[str, Any]) -> str:
+        identity, backend, example, mode, requirements = (
+            self._validated_experiment_request(
+                request,
+                default_identity="user-a",
+                require_hardware_confirmation=False,
+            )
+        )
+        preview_id = self._experiment_id(request)
+        experiment_root = (
+            f"/workspace/home/{identity}/qfw-dashboard/experiments/{preview_id}"
+        )
+        batch_path = f"{experiment_root}/job.sbatch"
+        output_path = f"{experiment_root}/job.out"
+        experiment = Experiment(
+            preview_id, identity, backend, example, mode
+        )
+        batch_script = self._batch_script(experiment, requirements, output_path)
+        return "\n".join((
+            f"# Generated batch file: {batch_path}",
+            f"# Submission command: {shlex.join(('sbatch', '--parsable', batch_path))}",
+            "",
+            batch_script,
+        ))

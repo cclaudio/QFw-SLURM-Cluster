@@ -17,7 +17,21 @@ def test_cluster_runner_captures_selected_identity() -> None:
     assert argv[:5] == ["docker", "exec", "--user", "user-b", "--workdir"]
     assert "/workspace/home/user-b" in argv
     assert "HOME=/workspace/home/user-b" in argv
-    assert argv[-3:] == ["/bin/bash", "-lc", "id -un"]
+    assert argv[-3:-1] == ["/bin/bash", "-lc"]
+    assert "timeout --signal=TERM --kill-after=2 30" in argv[-1]
+    assert "id -un" in argv[-1]
+
+
+def test_cluster_timeout_is_enforced_inside_container() -> None:
+    runner = CommandRunner(Path("."))
+    with patch("qfw_slurm_dashboard.runner.subprocess.run") as run:
+        run.return_value.returncode = 124
+        run.return_value.stdout = ""
+        run.return_value.stderr = ""
+        runner.cluster("root", ("slow-command",), timeout=7)
+    argv = run.call_args.args[0]
+    assert "timeout --signal=TERM --kill-after=2 7" in argv[-1]
+    assert run.call_args.kwargs["timeout"] == 10
 
 
 def test_cluster_runner_rejects_unknown_identity() -> None:

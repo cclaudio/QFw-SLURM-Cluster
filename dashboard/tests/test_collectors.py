@@ -1,6 +1,15 @@
+import threading
+import time
 from pathlib import Path
 
-from qfw_slurm_dashboard.collectors import collect_all, docker_status
+from qfw_slurm_dashboard.collectors import (
+    collect_all,
+    docker_status,
+    LiveCollectorSet,
+    service_plane_status,
+    slurm_status,
+)
+from qfw_slurm_dashboard.models import SourceState, utc_now
 from qfw_slurm_dashboard.runner import CommandResult
 
 
@@ -15,7 +24,7 @@ class FakeRunner:
         if command == "sinfo":
             return CommandResult(tuple(argv), 0, "c1|normal|idle||4|1024|compute\n", "")
         if command == "squeue":
-            return CommandResult(tuple(argv), 0, "", "")
+            return CommandResult(tuple(argv), 0, '{"jobs": []}\n', "")
         if command == "scontrol":
             return CommandResult(tuple(argv), 0, "Slurmctld(primary) at UP\n", "")
         if command == "sacctmgr":
@@ -58,3 +67,97 @@ def test_collector_exception_does_not_hide_healthy_sources() -> None:
     sources = {item.name: item for item in collect_all(runner)}
     assert sources["docker"].status == "unavailable"
     assert sources["slurm"].status == "ready"
+
+
+def test_live_collectors_publish_each_source_without_blocking() -> None:
+    release = threading.Event()
+
+    def slow_status(_runner):
+        release.wait(1)
+        return SourceState("slow", "ready", utc_now(), [{"value": "live"}])
+
+    collectors = LiveCollectorSet(
+        FakeRunner(), collectors=(slow_status,), refresh_interval=60
+    )
+    started = time.monotonic()
+    assert collectors.snapshot()[0].status == "loading"
+    assert time.monotonic() - started < 0.1
+    release.set()
+    for _ in range(100):
+        result = collectors.snapshot()[0]
+        if result.status == "ready":
+            break
+        time.sleep(0.01)
+    assert result.records == [{"value": "live"}]
+
+
+def test_slurm_jobs_include_names_for_topology_activity() -> None:
+    class JobRunner(FakeRunner):
+        def cluster(self, identity, argv, **kwargs):
+            if argv[0] == "squeue":
+                return CommandResult(
+                    tuple(argv), 0,
+                    '{"jobs":[{'
+                    '"job_id":42,"user_name":"user-a",'
+                    '"job_state":["RUNNING"],"partition":"normal",'
+                    '"nodes":"c1","name":"qfw-qiskit-simple",'
+                    '"state_reason":"None","state_description":""}]}\n',
+                    "",
+                )
+            return super().cluster(identity, argv, **kwargs)
+
+    source = slurm_status(JobRunner())
+    job = next(item for item in source.records if item["kind"] == "job")
+    assert job["job_name"] == "qfw-qiskit-simple"
+    assert job["nodes"] == "c1"
+
+
+def test_slurm_multiline_pending_reason_is_one_job_record() -> None:
+    class PendingRunner(FakeRunner):
+        def cluster(self, identity, argv, **kwargs):
+            if argv[0] == "squeue":
+                return CommandResult(
+                    tuple(argv), 0,
+                    '{"jobs":[{'
+                    '"job_id":36,"het_job_id":{"set":true,"number":35},'
+                    '"het_job_offset":{"set":true,"number":1},'
+                    '"user_name":"user-a","job_state":["PENDING"],'
+                    '"partition":"normal","nodes":"",'
+                    '"name":"qfw-qiskit-simple",'
+                    '"state_reason":"BurstBufferOperation",'
+                    '"state_description":"first line\\ntraceback line"}]}\n',
+                    "",
+                )
+            return super().cluster(identity, argv, **kwargs)
+
+    jobs = [
+        item for item in slurm_status(PendingRunner()).records
+        if item["kind"] == "job"
+    ]
+    assert len(jobs) == 1
+    assert jobs[0]["job_id"] == "35+1"
+    assert jobs[0]["reason"] == "first line\ntraceback line"
+
+
+def test_service_plane_reports_each_component_independently() -> None:
+    class PartialServiceRunner:
+        def cluster(self, identity, argv, **kwargs):
+            output = """Directory service (slurmctld)
+{"components":{"directory":{"node":"slurmctld","ready":false,"state":"stopped"}}}
+NWQSim QPM (nwqsim-head)
+{"components":{"prte-dvm":{"node":"nwqsim-head","ready":true,"state":"ready"},"qpm:nwqsim":{"node":"nwqsim-head","ready":true,"state":"ready"}}}
+IQM QPM (iqm-head)
+{"components":{"qpm:iqm-ornl-20q":{"node":"iqm-head","ready":true,"state":"ready"}}}
+QFw Slurm gateway (slurmctld:18095)
+ready
+"""
+            return CommandResult(tuple(argv), 1, output, "")
+
+    source = service_plane_status(PartialServiceRunner())
+    records = {item["component"]: item for item in source.records}
+    assert source.status == "degraded"
+    assert records["directory"]["state"] == "stopped"
+    assert records["nwqsim"]["state"] == "ready"
+    assert records["dvm"]["state"] == "ready"
+    assert records["iqm"]["state"] == "ready"
+    assert records["gateway"]["state"] == "ready"

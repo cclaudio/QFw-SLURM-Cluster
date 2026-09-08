@@ -49,8 +49,15 @@ class CommandRunner:
         cwd: str | None = None,
         timeout: float | None = None,
     ) -> CommandResult:
-        docker_argv = self.cluster_argv(identity, argv, container=container, cwd=cwd)
-        return self.host(docker_argv, timeout=timeout)
+        command_timeout = timeout or self.timeout
+        docker_argv = self.cluster_argv(
+            identity,
+            argv,
+            container=container,
+            cwd=cwd,
+            timeout=command_timeout,
+        )
+        return self.host(docker_argv, timeout=command_timeout + 3)
 
     def cluster_argv(
         self,
@@ -59,12 +66,19 @@ class CommandRunner:
         *,
         container: str = "slurmctld",
         cwd: str | None = None,
+        timeout: float | None = None,
     ) -> tuple[str, ...]:
         if identity not in IDENTITIES:
             raise ValueError(f"unsupported cluster identity: {identity}")
         home = "/root" if identity == "root" else f"/workspace/home/{identity}"
         workdir = cwd or home
         command = shlex.join(tuple(str(item) for item in argv))
+        if timeout is not None:
+            command = shlex.join((
+                "timeout", "--signal=TERM", "--kill-after=2",
+                str(max(1, int(timeout))),
+                "/bin/bash", "-lc", command,
+            ))
         return (
             "docker",
             "exec",

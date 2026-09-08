@@ -93,3 +93,21 @@ class DashboardStore:
 
     def audit(self, event: dict[str, Any]) -> None:
         self.append_event({"kind": "audit", **event})
+
+    def clear_dashboard_state(self) -> dict[str, int]:
+        """Remove Dashboard-owned history without touching external artifacts."""
+        with self._lock:
+            counts = {"operations": 0, "experiments": 0, "events": 0}
+            for category in ("operations", "experiments"):
+                directory = self.root / category
+                if not directory.exists():
+                    continue
+                for item in directory.glob("*.json"):
+                    item.unlink(missing_ok=True)
+                    counts[category] += 1
+            events = self.root / "events.jsonl"
+            if events.exists():
+                with events.open(encoding="utf-8", errors="replace") as stream:
+                    counts["events"] = sum(1 for _ in stream)
+                events.unlink()
+            return counts

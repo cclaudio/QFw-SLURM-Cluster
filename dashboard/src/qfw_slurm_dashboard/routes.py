@@ -103,6 +103,26 @@ def _artifact(request: RouteRequest) -> JsonResponse:
         return _error(error)
 
 
+def _experiment_archive(request: RouteRequest) -> JsonResponse:
+    try:
+        return JsonResponse(_service(request).experiment_archive(
+            str((request.params.get("experiment_id") or [""])[0]),
+            str((request.params.get("identity") or [""])[0]),
+        ))
+    except Exception as error:
+        return _error(error)
+
+
+def _service_archive(request: RouteRequest) -> JsonResponse:
+    try:
+        return JsonResponse(_service(request).service_archive(
+            str((request.params.get("service_id") or [""])[0]),
+            str((request.params.get("identity") or [""])[0]),
+        ))
+    except Exception as error:
+        return _error(error)
+
+
 def _widget(request: RouteRequest) -> HtmlResponse:
     body = resources.files("qfw_slurm_dashboard").joinpath(
         "assets/widget.html"
@@ -137,12 +157,23 @@ def _abort_operation(request: RouteRequest) -> JsonResponse:
         return _error(error)
 
 
+def _reset(request: RouteRequest) -> JsonResponse:
+    try:
+        body = request.body()
+        return JsonResponse(_service(request).clear_dashboard_state(
+            str(body.get("identity", ""))
+        ))
+    except Exception as error:
+        return _error(error)
+
+
 def _preview(request: RouteRequest) -> JsonResponse:
     try:
+        preview = _service(request).preview_experiment(request.body())
         return JsonResponse({
             "schema": "qfw-dashboard-preview-v1",
             "outcome": "success",
-            "command": _service(request).command_preview(request.body()),
+            **preview,
         })
     except Exception as error:
         return _error(error)
@@ -180,17 +211,6 @@ def _retry(request: RouteRequest) -> JsonResponse:
             body.get("submit_real_hardware") is True,
         )
         return JsonResponse(experiment.payload(), status=HTTPStatus.ACCEPTED)
-    except Exception as error:
-        return _error(error)
-
-
-def _compare(request: RouteRequest) -> JsonResponse:
-    try:
-        body = request.body()
-        return JsonResponse(_service(request).compare_results(
-            [str(item) for item in body.get("experiment_ids", [])],
-            str(body.get("identity", "")),
-        ))
     except Exception as error:
         return _error(error)
 
@@ -240,14 +260,22 @@ ROUTES = (
     route("GET", "/api/qfw-dashboard/events", "events", lease=False),
     route("GET", "/api/qfw-dashboard/logs", "logs", lease=False),
     route("GET", "/api/qfw-dashboard/artifact", "artifact", lease=False),
+    route(
+        "GET", "/api/qfw-dashboard/experiments/archive",
+        "experiment-archive", lease=False,
+    ),
+    route(
+        "GET", "/api/qfw-dashboard/services/archive",
+        "service-archive", lease=False,
+    ),
     route("GET", "/qfw-dashboard/widget", "widget", lease=False),
     route("POST", "/api/qfw-dashboard/operations", "operation"),
     route("POST", "/api/qfw-dashboard/operations/abort", "abort-operation"),
+    route("POST", "/api/qfw-dashboard/reset", "reset"),
     route("POST", "/api/qfw-dashboard/preview", "preview"),
     route("POST", "/api/qfw-dashboard/experiments", "experiment"),
     route("POST", "/api/qfw-dashboard/experiments/cancel", "cancel"),
     route("POST", "/api/qfw-dashboard/experiments/retry", "retry"),
-    route("POST", "/api/qfw-dashboard/results/compare", "compare"),
     route("POST", "/api/qfw-dashboard/shell", "shell"),
 )
 
@@ -257,13 +285,15 @@ HANDLERS: dict[str, Any] = {
     "events": _events,
     "logs": _logs,
     "artifact": _artifact,
+    "experiment-archive": _experiment_archive,
+    "service-archive": _service_archive,
     "widget": _widget,
     "operation": _operation,
     "abort-operation": _abort_operation,
+    "reset": _reset,
     "preview": _preview,
     "experiment": _experiment,
     "cancel": _cancel,
     "retry": _retry,
-    "compare": _compare,
     "shell": _shell,
 }
