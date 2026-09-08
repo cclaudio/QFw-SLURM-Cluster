@@ -80,6 +80,7 @@
   let dashboardResetGeneration = 0;
   let dashboardResetStatus = "idle";
   const nonPrimarySelectionPointers = new Set();
+  const activeScrollPointers = new Map();
   const popupWindows = new Map();
   const activeDashboardDialogs = new Set();
 
@@ -1916,9 +1917,38 @@
     };
   }
 
+  function selectionIntersects(container) {
+    if (!container) return false;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+    for (let index = 0; index < selection.rangeCount; index += 1) {
+      const range = selection.getRangeAt(index);
+      if (container.contains(range.startContainer)
+          || container.contains(range.endContainer)) return true;
+      try {
+        if (range.intersectsNode(container)) return true;
+      } catch (_error) {
+        // Detached nodes cannot intersect the current document selection.
+      }
+    }
+    return false;
+  }
+
+  function userIsInteractingWith(container) {
+    if (!container) return false;
+    const active = document.activeElement;
+    const editing = active instanceof Element
+      && active.matches("input, textarea, select, [contenteditable=true]")
+      && container.contains(active);
+    const scrolling = [...activeScrollPointers.values()].some((target) =>
+      container.contains(target));
+    return editing || scrolling || selectionIntersects(container);
+  }
+
   function refreshExperimentSubmissionStatus(root) {
     const form = root?.querySelector(".qfw-experiment-form");
     if (!form) return;
+    if (userIsInteractingWith(form)) return;
     const submit = form.querySelector("[data-qfw-submit-set]");
     const output = form.querySelector("[data-qfw-submission-status]");
     const terminal = form.querySelector("[data-qfw-submission-output]");
@@ -2852,11 +2882,12 @@
     WIDGETS.forEach(([id]) => {
       const widget = root.querySelector(`.qfw-widget[data-widget="${id}"]`);
       if (!widget) return;
+      if (userIsInteractingWith(widget)) return;
       if (OPERATION_WIDGET_GROUPS[id]) {
         refreshOperationWidget(widget, OPERATION_WIDGET_GROUPS[id]);
         return;
       }
-      if (id === "cluster-access" || widget.contains(document.activeElement)) return;
+      if (id === "cluster-access") return;
       const body = widget.children[1];
       if (body) body.replaceWith(renderWidgetBody(id, widgetPayload(id)));
     });
@@ -3019,6 +3050,8 @@
   }
 
   function renderProgress() {
+    const pane = runtimeApi?.elements.progressOutputPane;
+    if (!pane || userIsInteractingWith(pane)) return;
     const filtered = progressEvents.filter(progressMatches).slice(-500);
     window.ElectroBoyFrontend.invokeModule("progress", "clearProgressOutput");
     filtered.forEach((event) => {
@@ -3205,6 +3238,28 @@
     }, 0);
   }
 
+  function scrollInteractionTarget(event) {
+    return event.composedPath().find((target) => {
+      if (!(target instanceof Element)) return false;
+      const style = window.getComputedStyle(target);
+      const vertical = /^(auto|scroll)$/.test(style.overflowY)
+        && target.scrollHeight > target.clientHeight;
+      const horizontal = /^(auto|scroll)$/.test(style.overflowX)
+        && target.scrollWidth > target.clientWidth;
+      return vertical || horizontal;
+    }) || null;
+  }
+
+  function trackScrollPointer(event) {
+    if (event.button !== 0) return;
+    const target = scrollInteractionTarget(event);
+    if (target) activeScrollPointers.set(event.pointerId, target);
+  }
+
+  function finishScrollPointer(event) {
+    activeScrollPointers.delete(event.pointerId);
+  }
+
   function activate(runtime) {
     runtimeApi = runtime;
     runtimeApi.ui.setWorkflowSideSheetCollapsed(true);
@@ -3217,8 +3272,12 @@
     connectWidgetChannel();
     installProgressTools();
     document.addEventListener("pointerdown", trackDashboardPointerSelection, true);
+    document.addEventListener("pointerdown", trackScrollPointer, true);
     document.addEventListener("pointerup", finishNonPrimarySelectionPointer, true);
+    document.addEventListener("pointerup", finishScrollPointer, true);
     document.addEventListener("pointercancel", finishNonPrimarySelectionPointer, true);
+    document.addEventListener("pointercancel", finishScrollPointer, true);
+    document.addEventListener("lostpointercapture", finishScrollPointer, true);
     document.addEventListener("focusin", trackDashboardFocusSelection, true);
     renderDashboard();
     pollState();
@@ -3252,9 +3311,14 @@
     selectedDashboardWidget = null;
     selectedExperimentPhase = null;
     nonPrimarySelectionPointers.clear();
+    activeScrollPointers.clear();
     document.removeEventListener("pointerdown", trackDashboardPointerSelection, true);
+    document.removeEventListener("pointerdown", trackScrollPointer, true);
     document.removeEventListener("pointerup", finishNonPrimarySelectionPointer, true);
+    document.removeEventListener("pointerup", finishScrollPointer, true);
     document.removeEventListener("pointercancel", finishNonPrimarySelectionPointer, true);
+    document.removeEventListener("pointercancel", finishScrollPointer, true);
+    document.removeEventListener("lostpointercapture", finishScrollPointer, true);
     document.removeEventListener("focusin", trackDashboardFocusSelection, true);
     [...activeDashboardDialogs].forEach((close) => close(false));
     widgetChannel?.close();

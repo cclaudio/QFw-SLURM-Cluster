@@ -224,6 +224,16 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "function renderDashboardRoot(root)" in frontend
     assert "function refreshDashboardDataRoot(root)" in frontend
     assert "function refreshOperationWidget(widget, group)" in frontend
+    assert "function selectionIntersects(container)" in frontend
+    assert "function userIsInteractingWith(container)" in frontend
+    assert 'active.matches("input, textarea, select, [contenteditable=true]")' in frontend
+    assert "const activeScrollPointers = new Map();" in frontend
+    assert "function scrollInteractionTarget(event)" in frontend
+    assert "function trackScrollPointer(event)" in frontend
+    assert "function finishScrollPointer(event)" in frontend
+    assert "if (userIsInteractingWith(form)) return;" in frontend
+    assert "if (userIsInteractingWith(widget)) return;" in frontend
+    assert "if (!pane || userIsInteractingWith(pane)) return;" in frontend
     assert 'widget.classList.toggle("has-error", operation?.status === "failed")' in frontend
     assert "operation_failed: OPERATION_WIDGET_GROUPS[id]" in frontend
     assert "refreshDashboardData();" in frontend
@@ -263,7 +273,11 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "containers[index].style.height = position.height" in popout
     assert 'container.style.removeProperty("height")' in popout
     assert 'if (topologyGraph) topologyGraph.style.width = "100%"' in popout
-    assert "if (output.contains(document.activeElement))" in popout
+    assert "function selectionIntersects(container)" in popout
+    assert "function userIsInteractingWith(container)" in popout
+    assert "const activeScrollPointers = new Map();" in popout
+    assert "function scrollInteractionTarget(event)" in popout
+    assert "if (userIsInteractingWith(output))" in popout
     assert 'output.addEventListener("focusout"' in popout
     assert "function confirmWidgetAction(" in popout
     assert 'output.classList.toggle("has-error", message.operation_failed === true)' in popout
