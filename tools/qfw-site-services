@@ -13,7 +13,7 @@ QFW_IQM_NODE="${QFW_IQM_NODE:-iqm-head}"
 QFW_SIMULATOR_NODES="${QFW_SIMULATOR_NODES:-nwqsim-head,nwqsim-worker-1,nwqsim-worker-2}"
 QFW_GATEWAY_HOST="${QFW_GATEWAY_HOST:-slurmctld}"
 QFW_GATEWAY_PORT="${QFW_GATEWAY_PORT:-18095}"
-QFW_GATEWAY_CONFIG="${QFW_GATEWAY_CONFIG:-/etc/qfw-slurm/gateway.yaml}"
+QFW_GATEWAY_CONFIG="${QFW_GATEWAY_CONFIG:-/etc/openqse/qfw-slurm/gateway.yaml}"
 QFW_GATEWAY_USER="${QFW_GATEWAY_USER:-qfw-slurm}"
 QFW_GATEWAY_LOG_DIR="${QFW_GATEWAY_LOG_DIR:-/var/log/qfw-slurm-gateway}"
 QFW_SITE_START_TIMEOUT="${QFW_SITE_START_TIMEOUT:-300}"
@@ -298,6 +298,10 @@ stop_iqm() {
 
 start_gateway() {
 	require_directory || return 1
+	if ! ${dry_run} && gateway_managed_ready >/dev/null 2>&1; then
+		echo "QFw Slurm gateway is already ready"
+		return 0
+	fi
 	run_gateway start || return 1
 	if ! wait_for_gateway; then
 		echo "qfw-site-services: gateway did not become ready" >&2
@@ -359,6 +363,10 @@ require_directory_dependents_stopped() {
 }
 
 start_directory() {
+	if ! ${dry_run} && directory_ready >/dev/null 2>&1; then
+		echo "Directory service is already ready"
+		return 0
+	fi
 	run_qfw "${QFW_DIR_NODE}" qfw-dir-svc start \
 		--scope site \
 		--run-dir "${directory_run_dir}" \
@@ -368,6 +376,10 @@ start_directory() {
 
 start_nwqsim() {
 	require_directory || return 1
+	if ! ${dry_run} && nwqsim_ready >/dev/null 2>&1; then
+		echo "NWQSim QPM is already ready"
+		return 0
+	fi
 	run_qfw "${QFW_NWQSIM_NODE}" qfw-qpm-svc start \
 		--scope site \
 		--run-dir "${nwqsim_run_dir}" \
@@ -378,6 +390,10 @@ start_nwqsim() {
 
 start_iqm() {
 	require_directory || return 1
+	if ! ${dry_run} && iqm_ready >/dev/null 2>&1; then
+		echo "IQM QPM is already ready"
+		return 0
+	fi
 	run_qfw "${QFW_IQM_NODE}" qfw-qpm-svc start \
 		--scope site \
 		--run-dir "${iqm_run_dir}" \
@@ -390,28 +406,55 @@ start_services() {
 	local directory_started=false
 	local nwqsim_started=false
 	local iqm_started=false
+	local directory_was_ready=false
+	local nwqsim_was_ready=false
+	local iqm_was_ready=false
+	local gateway_was_ready=false
 
 	if ${dry_run}; then
 		echo "NWQSim simulator nodes: ${QFW_SIMULATOR_NODES}"
+	else
+		directory_ready >/dev/null 2>&1 && directory_was_ready=true
+		nwqsim_ready >/dev/null 2>&1 && nwqsim_was_ready=true
+		iqm_ready >/dev/null 2>&1 && iqm_was_ready=true
+		gateway_managed_ready >/dev/null 2>&1 && gateway_was_ready=true
+
+		# A live dependent cannot be assumed to be registered with a newly
+		# created directory incarnation. Recreate those dependents in normal
+		# shutdown order before restoring the complete service plane.
+		if ! ${directory_was_ready}; then
+			if ${gateway_was_ready}; then
+				stop_gateway || return 1
+				gateway_was_ready=false
+			fi
+			if ${iqm_was_ready}; then
+				stop_iqm || return 1
+				iqm_was_ready=false
+			fi
+			if ${nwqsim_was_ready}; then
+				stop_nwqsim || return 1
+				nwqsim_was_ready=false
+			fi
+		fi
 	fi
 
 	if ! start_directory; then
 		return 1
 	fi
-	directory_started=true
+	${directory_was_ready} || directory_started=true
 
 	if ! start_nwqsim; then
 		${directory_started} && stop_directory >/dev/null 2>&1 || true
 		return 1
 	fi
-	nwqsim_started=true
+	${nwqsim_was_ready} || nwqsim_started=true
 
 	if ! start_iqm; then
 		${nwqsim_started} && stop_nwqsim >/dev/null 2>&1 || true
 		${directory_started} && stop_directory >/dev/null 2>&1 || true
 		return 1
 	fi
-	iqm_started=true
+	${iqm_was_ready} || iqm_started=true
 
 	if ! start_gateway; then
 		${iqm_started} && stop_iqm >/dev/null 2>&1 || true
@@ -505,68 +548,66 @@ recover_target() {
 	start_target
 }
 
-if [[ ${1:-} == "__gateway-supervisor" ]]; then
-	shift
-	gateway_supervisor "$@"
-	exit $?
-fi
+main() {
+	local action=""
 
-while [[ $# -gt 0 ]]; do
-	case "$1" in
-	--dry-run)
-		dry_run=true
+	if [[ ${1:-} == "__gateway-supervisor" ]]; then
 		shift
-		;;
-	--target)
-		[[ $# -ge 2 ]] || die "--target requires a value"
-		target="$2"
-		shift 2
-		;;
-	--target=*)
-		target="${1#*=}"
-		shift
-		;;
-	-h|--help)
-		usage
-		exit 0
-		;;
-	start|status|stop|restart|recover)
-		[[ -z "${action:-}" ]] || die "only one action may be specified"
-		action="$1"
-		shift
-		;;
-	*)
-		die "unknown argument: $1"
-		;;
+		gateway_supervisor "$@"
+		return $?
+	fi
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--dry-run)
+			dry_run=true
+			shift
+			;;
+		--target)
+			[[ $# -ge 2 ]] || die "--target requires a value"
+			target="$2"
+			shift 2
+			;;
+		--target=*)
+			target="${1#*=}"
+			shift
+			;;
+		-h|--help)
+			usage
+			return 0
+			;;
+		start|status|stop|restart|recover)
+			[[ -z "${action}" ]] || die "only one action may be specified"
+			action="$1"
+			shift
+			;;
+		*)
+			die "unknown argument: $1"
+			;;
+		esac
+	done
+
+	[[ -n "${action}" ]] || {
+		usage >&2
+		return 2
+	}
+	case "${target}" in
+	all|directory|nwqsim|iqm|gateway) ;;
+	*) die "unknown target: ${target}" ;;
 	esac
-done
+	if ! ${dry_run} && [[ ${EUID} -ne 0 ]]; then
+		die "must run as root"
+	fi
 
-[[ -n "${action:-}" ]] || {
-	usage >&2
-	exit 2
+	case "${action}" in
+	start) start_target ;;
+	status) target_status ;;
+	stop) stop_target ;;
+	restart) restart_target ;;
+	recover) recover_target ;;
+	esac
 }
-case "${target}" in
-all|directory|nwqsim|iqm|gateway) ;;
-*) die "unknown target: ${target}" ;;
-esac
-if ! ${dry_run} && [[ ${EUID} -ne 0 ]]; then
-	die "must run as root"
-fi
 
-case "${action}" in
-start)
-	start_target
-	;;
-status)
-	target_status
-	;;
-stop)
-	stop_target
-	;;
-restart)
-	restart_target
-	;;
-recover)
-	recover_target
-	;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi
