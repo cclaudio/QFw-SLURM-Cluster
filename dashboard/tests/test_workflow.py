@@ -9,6 +9,7 @@ def test_workflow_registers_only_public_required_modules() -> None:
     assert definition.workspace_policy == "shared-singleton"
     assert definition.modules == (
         "core",
+        "agent_sessions",
         "markdown_documents",
         "file_browser",
         "project_shell",
@@ -20,8 +21,13 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     frontend = resources.files("qfw_slurm_dashboard").joinpath(
         "assets/frontend.js"
     ).read_text()
-    for label in ("Dashboard", "Progress", "File", "Shell"):
+    for label in ("Dashboard", "AI Agent", "Progress", "File", "Shell"):
         assert f'label: "{label}"' in frontend
+    assert '{ kind: "agent", label: "AI Agent" }' in frontend
+    assert 'kind: "input"' not in frontend
+    assert "runtimeApi.ui.setWorkflowSideSheetCollapsed(true);" in frontend
+    assert "runtimeApi?.ui.setWorkflowSideSheetCollapsed(false);" in frontend
+    assert "runtimeApi.ui.setAgentInputVisible(true);" in frontend
     for widget in (
         "health", "inventory", "cluster-control", "service-control",
         "node-control", "cluster-access", "nodes", "services", "allocations",
@@ -276,6 +282,9 @@ def test_dashboard_uses_electroboy_pane_colors() -> None:
     assert "overflow: hidden;" in stylesheet
     assert ".qfw-widget-chevron" in stylesheet
     assert ".qfw-slurm-cluster-workflow .pane-layout-kind" in stylesheet
+    assert ':has(.pane-layout-leaf[data-pane-kind="agent"])' in stylesheet
+    assert ".input-resize-handle" in stylesheet
+    assert ".input-pane" in stylesheet
     assert ".qfw-widget-sections" in stylesheet
     assert ".qfw-widget-group-title::after" in stylesheet
     assert ".qfw-phase-connector" not in stylesheet

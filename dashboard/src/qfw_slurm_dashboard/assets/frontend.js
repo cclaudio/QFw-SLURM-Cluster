@@ -2907,6 +2907,8 @@
 
   function activate(runtime) {
     runtimeApi = runtime;
+    runtimeApi.ui.setWorkflowSideSheetCollapsed(true);
+    runtimeApi.ui.setAgentInputVisible(true);
     loadPresentation();
     progressIdentity = activeIdentity;
     dashboardRoot = element("div", "qfw-dashboard");
@@ -2963,6 +2965,7 @@
     if (dashboardRoot?.isConnected && originalStatusOutput) {
       dashboardRoot.replaceWith(originalStatusOutput);
     }
+    runtimeApi?.ui.setWorkflowSideSheetCollapsed(false);
     dashboardRoot = null;
     originalStatusOutput = null;
     runtimeApi = null;
@@ -2982,6 +2985,7 @@
         singleton: true,
         popoutMode: "mirror",
       },
+      { kind: "agent", label: "AI Agent" },
       { kind: "progress", label: "Progress" },
       { kind: "artifact", label: "File" },
       { kind: "shell", label: "Shell" },

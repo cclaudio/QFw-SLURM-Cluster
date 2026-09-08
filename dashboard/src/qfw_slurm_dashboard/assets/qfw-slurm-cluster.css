@@ -3,6 +3,15 @@
   overflow: hidden;
 }
 
+.qfw-slurm-cluster-workflow:not(:has(.pane-layout-leaf[data-pane-kind="agent"])) .agent-pane {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.qfw-slurm-cluster-workflow:not(:has(.pane-layout-leaf[data-pane-kind="agent"])) .input-resize-handle,
+.qfw-slurm-cluster-workflow:not(:has(.pane-layout-leaf[data-pane-kind="agent"])) .input-pane {
+  display: none;
+}
+
 .qfw-slurm-cluster-workflow .pane-layout-kind {
   font-size: 10px;
   padding-inline: 4px;

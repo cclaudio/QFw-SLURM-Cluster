@@ -13,6 +13,7 @@ def workflow() -> WorkflowDefinition:
         label="QFw Slurm Cluster",
         modules=(
             "core",
+            "agent_sessions",
             "markdown_documents",
             "file_browser",
             "project_shell",
