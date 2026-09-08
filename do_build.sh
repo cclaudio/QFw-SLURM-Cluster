@@ -7,7 +7,7 @@ ENV_FILE="${SCRIPT_DIR}/qfw-install.env"
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--dry-run] [--force]
+Usage: $(basename "$0") [--dry-run] [--force] [--no-cache]
 
 Build the configured container image. If ${ENV_FILE} does not exist yet,
 run ./do_configure.sh first with its default settings.
@@ -15,11 +15,13 @@ run ./do_configure.sh first with its default settings.
 Options:
   --dry-run   Print the install/bootstrap and docker build steps without running them
   --force     Stop and remove the current compose stack, then rebuild with --no-cache
+  --no-cache  Rebuild every image layer without removing containers or named volumes
 EOF
 }
 
 DRY_RUN=false
 FORCE=false
+NO_CACHE=false
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -29,6 +31,11 @@ while [ "$#" -gt 0 ]; do
             ;;
         --force)
             FORCE=true
+            NO_CACHE=true
+            shift
+            ;;
+        --no-cache)
+            NO_CACHE=true
             shift
             ;;
         -h|--help)
@@ -73,7 +80,7 @@ if ${DRY_RUN}; then
         QFW_SLURM_REPOSITORY="${QFW_SLURM_REPOSITORY:-https://github.com/openQSE/qfw-slurm.git}"
         QFW_SLURM_REF="${QFW_SLURM_REF:-release/v0.1}"
         echo "Would run:"
-        if ${FORCE}; then
+        if ${NO_CACHE}; then
             echo "  docker build \\"
             echo "    --no-cache \\"
         else
@@ -136,7 +143,7 @@ echo "Using qfw-slurm ${QFW_SLURM_REF} from ${QFW_SLURM_REPOSITORY}"
 echo "Resolved QFw revision ${QFW_SOURCE_REVISION}"
 echo "Resolved qfw-slurm revision ${QFW_SLURM_SOURCE_REVISION}"
 
-if ${FORCE}; then
+if ${NO_CACHE}; then
     docker build \
         --no-cache \
         -t "${IMAGE_NAME}:${IMAGE_TAG}" \
