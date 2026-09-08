@@ -29,6 +29,16 @@ from .redaction import redact, redact_payload
 from .runner import CommandRunner, IDENTITIES
 from .store import DashboardStore
 
+
+class SubmissionSetValidationError(ValueError):
+    """Identify the staged experiment that failed batch validation."""
+
+    def __init__(self, index: int, experiment_id: str, message: str) -> None:
+        super().__init__(message)
+        self.index = index
+        self.experiment_id = experiment_id
+
+
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SAFE_CONSTRAINT = re.compile(r"^[A-Za-z0-9_.+*|&!\[\]-]+$")
 _MEMORY_SIZE = re.compile(r"^[1-9][0-9]*(?:[KMGTP])?$", re.IGNORECASE)
@@ -734,6 +744,71 @@ class DashboardService:
             self._threads[experiment.experiment_id] = thread
             thread.start()
         return experiment
+
+    def submit_experiment_batch(
+        self, request: dict[str, Any]
+    ) -> list[Experiment]:
+        identity = str(request.get("identity", ""))
+        submissions = request.get("experiments")
+        if identity not in IDENTITIES:
+            raise ValueError("unsupported identity")
+        if not isinstance(submissions, list) or not submissions:
+            raise ValueError("submission set must contain at least one experiment")
+        if len(submissions) > 64:
+            raise ValueError("submission set cannot exceed 64 experiments")
+
+        hardware_confirmed = request.get("submit_real_hardware") is True
+        prepared: list[dict[str, Any]] = []
+        experiment_ids: set[str] = set()
+        for index, submission in enumerate(submissions):
+            if not isinstance(submission, dict):
+                raise SubmissionSetValidationError(
+                    index, "", "submission set entry must be an object"
+                )
+            candidate = {
+                **submission,
+                "identity": identity,
+                "submit_real_hardware": hardware_confirmed,
+            }
+            supplied_id = str(candidate.get("experiment_id", "")).strip()
+            try:
+                experiment_id = self._experiment_id(candidate)
+                self._validated_experiment_request(
+                    candidate,
+                    default_identity="",
+                    require_hardware_confirmation=True,
+                )
+            except (PermissionError, TypeError, ValueError) as error:
+                raise SubmissionSetValidationError(
+                    index, supplied_id, str(error)
+                ) from error
+            if experiment_id in experiment_ids:
+                raise SubmissionSetValidationError(
+                    index,
+                    experiment_id,
+                    f"duplicate experiment in submission set: {experiment_id}",
+                )
+            experiment_ids.add(experiment_id)
+            prepared.append({**candidate, "experiment_id": experiment_id})
+
+        with self._lifecycle_lock:
+            existing_ids = {
+                str(item.get("experiment_id", ""))
+                for item in self.store.experiments()
+            }
+            duplicate = sorted(experiment_ids & existing_ids)
+            if duplicate:
+                experiment_id = duplicate[0]
+                index = next(
+                    index for index, item in enumerate(prepared)
+                    if item["experiment_id"] == experiment_id
+                )
+                raise SubmissionSetValidationError(
+                    index,
+                    experiment_id,
+                    f"experiment already exists: {experiment_id}",
+                )
+            return [self.submit_experiment(item) for item in prepared]
 
     def _validated_experiment_request(
         self,

@@ -12,7 +12,7 @@ from electroboy.service.http import HtmlResponse, JsonResponse, ServiceResponse
 from electroboy.service.registry import RouteDefinition
 from electroboy.service.routes import RouteRequest
 
-from .service import DashboardService
+from .service import DashboardService, SubmissionSetValidationError
 from .models import utc_now
 
 _SERVICES: dict[tuple[Path, Path], DashboardService] = {}
@@ -50,14 +50,20 @@ def _error(error: Exception) -> JsonResponse:
         status = HTTPStatus.BAD_REQUEST
     else:
         status = HTTPStatus.CONFLICT
+    error_payload: dict[str, Any] = {
+        "type": error.__class__.__name__,
+        "message": str(error),
+    }
+    if isinstance(error, SubmissionSetValidationError):
+        error_payload["submission"] = {
+            "index": error.index,
+            "experiment_id": error.experiment_id,
+        }
     return JsonResponse({
         "schema": "qfw-dashboard-error-v1",
         "outcome": "error",
         "timestamp": utc_now(),
-        "error": {
-            "type": error.__class__.__name__,
-            "message": str(error),
-        },
+        "error": error_payload,
     }, status=status)
 
 
@@ -187,6 +193,18 @@ def _experiment(request: RouteRequest) -> JsonResponse:
         return _error(error)
 
 
+def _experiment_batch(request: RouteRequest) -> JsonResponse:
+    try:
+        experiments = _service(request).submit_experiment_batch(request.body())
+        return JsonResponse({
+            "schema": "qfw-dashboard-submission-set-v1",
+            "outcome": "accepted",
+            "experiments": [experiment.payload() for experiment in experiments],
+        }, status=HTTPStatus.ACCEPTED)
+    except Exception as error:
+        return _error(error)
+
+
 def _cancel(request: RouteRequest) -> JsonResponse:
     try:
         body = request.body()
@@ -274,6 +292,9 @@ ROUTES = (
     route("POST", "/api/qfw-dashboard/reset", "reset"),
     route("POST", "/api/qfw-dashboard/preview", "preview"),
     route("POST", "/api/qfw-dashboard/experiments", "experiment"),
+    route(
+        "POST", "/api/qfw-dashboard/experiments/batch", "experiment-batch"
+    ),
     route("POST", "/api/qfw-dashboard/experiments/cancel", "cancel"),
     route("POST", "/api/qfw-dashboard/experiments/retry", "retry"),
     route("POST", "/api/qfw-dashboard/shell", "shell"),
@@ -293,6 +314,7 @@ HANDLERS: dict[str, Any] = {
     "reset": _reset,
     "preview": _preview,
     "experiment": _experiment,
+    "experiment-batch": _experiment_batch,
     "cancel": _cancel,
     "retry": _retry,
     "shell": _shell,

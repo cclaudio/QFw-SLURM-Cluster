@@ -122,8 +122,10 @@
     });
     const payload = await response.json().catch(() => ({ error: "invalid response" }));
     if (!response.ok) {
-      throw new Error(payload.error?.message || payload.error
+      const error = new Error(payload.error?.message || payload.error
         || `${response.status} ${response.statusText}`);
+      error.payload = payload;
+      throw error;
     }
     return payload;
   }
@@ -194,6 +196,46 @@
     if (className) node.className = className;
     if (content !== "") node.append(document.createTextNode(String(content ?? "")));
     return node;
+  }
+
+  function iconButton(iconName, label) {
+    const button = element("button", "qfw-icon-button");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    const definitions = {
+      view: [
+        "M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z",
+        "M9 12a3 3 0 1 0 6 0 3 3 0 0 0-6 0Z",
+      ],
+      edit: [
+        "M4 20h4l11-11-4-4L4 16v4Z",
+        "m13-13 4 4",
+      ],
+      save: [
+        "M4 3h13l3 3v15H4V3Z",
+        "M8 3v6h8V3",
+        "M8 21v-7h8v7",
+      ],
+      cancel: ["M6 6l12 12", "M18 6 6 18"],
+      trash: [
+        "M4 7h16",
+        "M9 11v6",
+        "M15 11v6",
+        "M6 7l1 14h10l1-14",
+        "M9 7V4h6v3",
+      ],
+    };
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("aria-hidden", "true");
+    (definitions[iconName] || []).forEach((description) => {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", description);
+      svg.append(path);
+    });
+    button.type = "button";
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.append(svg);
+    return button;
   }
 
   function preserveScroll(node) {
@@ -1847,39 +1889,92 @@
     if (control.value !== selected) control.dispatchEvent(new Event("change"));
   }
 
+  function submissionSetEntries() {
+    return Array.isArray(widgetStates.submissionSet)
+      ? widgetStates.submissionSet : [];
+  }
+
+  function visibleSubmissionSetEntries() {
+    return submissionSetEntries().filter((entry) =>
+      entry.request?.identity === activeIdentity);
+  }
+
   function trackedExperimentSubmission() {
-    const tracked = widgetStates.experimentSubmission || {};
-    const experiment = (state.experiments || []).find((item) =>
-      item.experiment_id === tracked.experiment_id);
-    if (experiment) return experiment;
-    if (tracked.experiment_id && state.schema === "qfw-dashboard-v1") {
-      return {};
-    }
-    return tracked;
+    const selectedId = widgetStates.submissionSetSelected;
+    const entry = visibleSubmissionSetEntries().find((item) =>
+      item.draft_id === selectedId);
+    if (!entry) return {};
+    return (state.experiments || []).find((item) =>
+      item.experiment_id === entry.request?.experiment_id) || {
+      experiment_id: entry.request?.experiment_id || "",
+      status: entry.status || "staged",
+      slurm_job_id: entry.slurm_job_id || "",
+      manifest: entry.manifest || {},
+      result: entry.result || {},
+      preview: entry.preview || "",
+      error: entry.error || "",
+    };
   }
 
   function refreshExperimentSubmissionStatus(root) {
     const form = root?.querySelector(".qfw-experiment-form");
     if (!form) return;
-    const submit = form.querySelector("[data-qfw-submit-application]");
+    const submit = form.querySelector("[data-qfw-submit-set]");
     const output = form.querySelector("[data-qfw-submission-status]");
     const terminal = form.querySelector("[data-qfw-submission-output]");
     if (!submit || !output || !terminal) return;
+    const entries = visibleSubmissionSetEntries();
+    const staged = entries.filter((entry) => !entry.submitted);
+    const batchStatus = widgetStates.submissionSetStatus || {};
+    const editing = Boolean(widgetStates.submissionSetEditing);
+    const requestPending = batchStatus.status === "requesting";
+    form.querySelectorAll(".qfw-submission-set-row").forEach((row) => {
+      const entry = entries.find((item) => item.draft_id === row.dataset.draftId);
+      if (!entry) return;
+      const experiment = (state.experiments || []).find((item) =>
+        item.experiment_id === entry.request?.experiment_id);
+      const rowStatus = experiment?.status || entry.status || "staged";
+      const statusNode = row.querySelector(".qfw-submission-set-state");
+      if (statusNode) {
+        statusNode.className = `qfw-submission-set-state state-${rowStatus}`;
+        statusNode.textContent = rowStatus;
+      }
+      row.classList.toggle(
+        "has-error", ["failed", "invalid"].includes(rowStatus),
+      );
+    });
     const submission = trackedExperimentSubmission();
     const status = String(submission.status || "idle").toLowerCase();
     const active = [
-      "requesting", "created", "submitting", "submitted", "pending",
+      "created", "submitting", "submitted", "pending",
       "configuring", "running", "completing",
     ].includes(status);
-    const failed = status === "failed";
-    form.classList.toggle("is-submitting", active);
+    const failed = status === "failed" || batchStatus.status === "failed";
+    form.classList.toggle("is-submitting", requestPending);
     form.classList.toggle("has-error", failed);
-    submit.classList.toggle("is-depressed", active);
-    submit.disabled = active;
-    submit.setAttribute("aria-pressed", active ? "true" : "false");
-    submit.setAttribute("aria-busy", active ? "true" : "false");
+    submit.classList.toggle("is-depressed", requestPending);
+    submit.disabled = requestPending || editing || staged.length === 0;
+    submit.textContent = `Submit All (${staged.length})`;
+    submit.setAttribute("aria-pressed", requestPending ? "true" : "false");
+    submit.setAttribute("aria-busy", requestPending ? "true" : "false");
+    if (requestPending) {
+      output.textContent = `Submitting ${staged.length} applications …`;
+      output.dataset.state = "running";
+      return;
+    }
+    if (batchStatus.status === "failed") {
+      output.textContent = `Submission failed · ${batchStatus.error || "unknown error"}`;
+      output.dataset.state = "failed";
+      const invalid = entries.find((entry) =>
+        entry.draft_id === batchStatus.draft_id);
+      terminal.textContent = invalid?.error
+        ? `Validation error for ${invalid.request?.example || "application"}:\n\n${invalid.error}`
+        : String(batchStatus.error || "Submission failed");
+      return;
+    }
     if (!status || status === "idle") {
-      output.textContent = "Ready to submit";
+      output.textContent = staged.length
+        ? `${staged.length} applications staged` : "Submission Set is empty";
       output.dataset.state = "idle";
       return;
     }
@@ -1905,7 +2000,9 @@
       const summary = `${identity} · ${item.state || status}`;
       return item.reason ? `${summary}\n${item.reason}` : summary;
     }).join("\n\n");
-    const applicationOutput = String(submission.result?.output_tail || "").trim();
+    const applicationOutput = String(
+      submission.result?.output_tail || submission.preview || "",
+    ).trim();
     const command = String(submission.manifest?.command || "").trim();
     terminal.textContent = [
       command ? `$ ${command}` : "",
@@ -2241,12 +2338,12 @@
     });
 
     const previewPhase = phase(
-      6, "Preview and submit",
-      "Review the generated allocation before it reaches Slurm.",
+      6, "Preview and stage",
+      "Review the application, then add it to the Submission Set.",
     );
-    const submit = element("button", "", "Submit Application through Slurm");
-    submit.type = "submit";
-    submit.dataset.qfwSubmitApplication = "";
+    const addToSet = element("button", "", "Add to Submission Set");
+    addToSet.type = "button";
+    addToSet.dataset.qfwAddToSubmissionSet = "";
     const preview = element("button", "", "Preview batch file");
     preview.type = "button";
     const previewOutput = preserveScroll(
@@ -2339,13 +2436,34 @@
     }
     applyDraft(draft);
     const previewActions = element("div", "qfw-experiment-actions");
+    const stageStatus = element(
+      "span", "qfw-experiment-submission-status", "Ready to stage",
+    );
+    previewActions.append(preview, stageStatus, addToSet);
+    previewPhase.fields.append(previewActions);
+
+    const submissionSetSection = element("section", "qfw-submission-set");
+    const submissionSetHeader = element("header", "qfw-submission-set-header");
+    const submissionSetTitle = element("h4", "", "Submission Set");
+    const submissionSetCount = element("span", "qfw-submission-set-count");
+    submissionSetHeader.append(submissionSetTitle, submissionSetCount);
+    const submissionSetList = element("div", "qfw-submission-set-list");
+    const submissionSetEmpty = element(
+      "p", "qfw-submission-set-empty", "No applications have been staged.",
+    );
+    const submissionActions = element("div", "qfw-experiment-actions");
     const submissionStatus = element(
-      "span", "qfw-experiment-submission-status", "Ready to submit",
+      "span", "qfw-experiment-submission-status", "Submission Set is empty",
     );
     submissionStatus.dataset.qfwSubmissionStatus = "";
     submissionStatus.dataset.state = "idle";
-    previewActions.append(preview, submissionStatus, submit);
-    previewPhase.fields.append(previewActions, previewOutput);
+    const submitSet = element("button", "qfw-submit-set", "Submit All (0)");
+    submitSet.type = "button";
+    submitSet.dataset.qfwSubmitSet = "";
+    submissionActions.append(submissionStatus, submitSet);
+    submissionSetSection.append(
+      submissionSetHeader, submissionSetList, submissionActions, previewOutput,
+    );
     phases.append(
       reservationPhase.section,
       applicationPhase.section,
@@ -2354,7 +2472,7 @@
       runtimePhase.section,
       previewPhase.section,
     );
-    form.append(phases);
+    form.append(phases, submissionSetSection);
     form.addEventListener("input", () => {
       saveDraft();
       updatePhaseStatus();
@@ -2379,44 +2497,226 @@
         await notifyDashboard("Preview failed", error.message, "danger");
       }
     });
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const hardware = backend.value === "iqm";
-      if (hardware && !await confirmDashboardAction(
-        "Submit real-hardware application",
-        "This submits bounded work to the real IQM hardware.",
-        { severity: "warning", confirmLabel: "Submit application" },
-      )) return;
-      widgetStates.experimentSubmission = {
-        status: "requesting", experiment_id: "", slurm_job_id: "",
-      };
-      savePresentation();
-      refreshExperimentSubmissionStatus(form);
-      try {
-        const experiment = await request("/api/qfw-dashboard/experiments", {
-          method: "POST",
-          body: JSON.stringify({
-            ...formPayload(), submit_real_hardware: hardware,
-          }),
+
+    function replaceSubmissionSet(entries) {
+      const hidden = submissionSetEntries().filter((entry) =>
+        entry.request?.identity !== activeIdentity);
+      widgetStates.submissionSet = [...hidden, ...entries];
+    }
+
+    function finishEditing() {
+      widgetStates.experimentDraft =
+        widgetStates.submissionSetEditReturnDraft || {};
+      delete widgetStates.submissionSetEditing;
+      delete widgetStates.submissionSetEditReturnDraft;
+    }
+
+    function renderSubmissionSet() {
+      const entries = visibleSubmissionSetEntries();
+      const editingId = widgetStates.submissionSetEditing;
+      const selectedId = widgetStates.submissionSetSelected;
+      submissionSetCount.textContent = `${entries.length} applications`;
+      submissionSetList.replaceChildren();
+      if (!entries.length) submissionSetList.append(submissionSetEmpty);
+      entries.forEach((entry) => {
+        const experiment = (state.experiments || []).find((item) =>
+          item.experiment_id === entry.request?.experiment_id);
+        const status = experiment?.status || entry.status || "staged";
+        const row = element("div", "qfw-submission-set-row");
+        row.dataset.draftId = entry.draft_id;
+        row.classList.toggle("is-editing", editingId === entry.draft_id);
+        row.classList.toggle("is-viewing", selectedId === entry.draft_id);
+        row.classList.toggle("has-error", ["failed", "invalid"].includes(status));
+        const source = entry.request?.application_source || "example";
+        const name = source === "path"
+          ? String(entry.request?.application_path || "application").split("/").pop()
+          : entry.request?.example || "application";
+        const identity = element("div", "qfw-submission-set-identity");
+        identity.append(
+          element("strong", "", name),
+          element("span", `qfw-submission-set-state state-${status}`, status),
+        );
+        const actions = element("div", "qfw-submission-set-row-actions");
+        const view = iconButton("view", "View application");
+        const edit = iconButton("edit", "Edit application");
+        const save = iconButton("save", "Save application changes");
+        const cancel = iconButton("cancel", "Cancel application changes");
+        const remove = iconButton("trash", "Remove application");
+        edit.disabled = Boolean(entry.submitted || editingId);
+        save.disabled = editingId !== entry.draft_id;
+        cancel.disabled = editingId !== entry.draft_id;
+        remove.disabled = Boolean(entry.submitted
+          || (editingId && editingId !== entry.draft_id));
+        view.addEventListener("click", async () => {
+          widgetStates.submissionSetSelected = entry.draft_id;
+          if (!entry.submitted && !entry.preview) {
+            try {
+              const result = await request("/api/qfw-dashboard/preview", {
+                method: "POST", body: JSON.stringify(entry.request),
+              });
+              entry.preview = result.command;
+              replaceSubmissionSet(entries);
+            } catch (error) {
+              await notifyDashboard("Preview failed", error.message, "danger");
+              return;
+            }
+          }
+          savePresentation();
+          renderDashboard();
+          publishWidgets();
         });
-        widgetStates.experimentSubmission = {
-          status: experiment.status,
-          experiment_id: experiment.experiment_id,
-          slurm_job_id: experiment.slurm_job_id || "",
-        };
+        edit.addEventListener("click", () => {
+          widgetStates.submissionSetEditReturnDraft = formPayload();
+          widgetStates.submissionSetEditing = entry.draft_id;
+          widgetStates.submissionSetSelected = entry.draft_id;
+          widgetStates.experimentDraft = structuredClone(entry.request);
+          savePresentation();
+          renderDashboard();
+          publishWidgets();
+        });
+        save.addEventListener("click", () => {
+          entry.request = {
+            ...formPayload(), experiment_id: entry.request.experiment_id,
+          };
+          entry.preview = "";
+          entry.status = "staged";
+          delete entry.error;
+          replaceSubmissionSet(entries);
+          if (widgetStates.submissionSetStatus?.draft_id === entry.draft_id) {
+            widgetStates.submissionSetStatus = { status: "staged" };
+          }
+          finishEditing();
+          savePresentation();
+          renderDashboard();
+          publishWidgets();
+        });
+        cancel.addEventListener("click", () => {
+          finishEditing();
+          savePresentation();
+          renderDashboard();
+          publishWidgets();
+        });
+        remove.addEventListener("click", async () => {
+          if (!await confirmDashboardAction(
+            "Remove staged application",
+            `Remove ${name} from the Submission Set?`,
+            { severity: "danger", confirmLabel: "Remove application" },
+          )) return;
+          replaceSubmissionSet(entries.filter((item) => item !== entry));
+          if (editingId === entry.draft_id) finishEditing();
+          if (widgetStates.submissionSetSelected === entry.draft_id) {
+            delete widgetStates.submissionSetSelected;
+          }
+          savePresentation();
+          renderDashboard();
+          publishWidgets();
+        });
+        actions.append(view, edit, save, cancel, remove);
+        row.append(identity, actions);
+        submissionSetList.append(row);
+      });
+    }
+
+    addToSet.disabled = Boolean(widgetStates.submissionSetEditing);
+    addToSet.addEventListener("click", async () => {
+      try {
+        const payload = formPayload();
+        const result = await request("/api/qfw-dashboard/preview", {
+          method: "POST", body: JSON.stringify(payload),
+        });
+        payload.experiment_id = result.experiment_id;
+        const entries = visibleSubmissionSetEntries();
+        entries.push({
+          draft_id: result.experiment_id,
+          request: payload,
+          preview: result.command,
+          status: "staged",
+          submitted: false,
+        });
+        replaceSubmissionSet(entries);
+        widgetStates.submissionSetSelected = result.experiment_id;
+        widgetStates.submissionSetStatus = { status: "staged" };
         experimentId = window.crypto.randomUUID();
         saveDraft();
         savePresentation();
-        await refreshState();
+        renderDashboard();
+        publishWidgets();
       } catch (error) {
-        widgetStates.experimentSubmission = {
-          status: "failed", experiment_id: "", slurm_job_id: "",
-          error: error.message,
-        };
-        savePresentation();
-        refreshExperimentSubmissionStatus(form);
+        await notifyDashboard("Unable to stage application", error.message, "danger");
       }
     });
+
+    submitSet.addEventListener("click", async () => {
+      const entries = visibleSubmissionSetEntries();
+      const staged = entries.filter((entry) => !entry.submitted);
+      if (!staged.length) return;
+      const hardware = staged.some((entry) => entry.request?.backend === "iqm");
+      if (hardware && !await confirmDashboardAction(
+        "Submit real-hardware applications",
+        "This Submission Set contains bounded work for real IQM hardware.",
+        { severity: "warning", confirmLabel: "Submit all applications" },
+      )) return;
+      widgetStates.submissionSetStatus = {
+        status: "requesting", count: staged.length,
+      };
+      staged.forEach((entry) => {
+        entry.status = "staged";
+        delete entry.error;
+      });
+      replaceSubmissionSet(entries);
+      savePresentation();
+      refreshExperimentSubmissionStatus(form);
+      try {
+        const result = await request("/api/qfw-dashboard/experiments/batch", {
+          method: "POST",
+          body: JSON.stringify({
+            identity: activeIdentity,
+            submit_real_hardware: hardware,
+            experiments: staged.map((entry) => entry.request),
+          }),
+        });
+        const accepted = new Map(result.experiments.map((item) => [
+          item.experiment_id, item,
+        ]));
+        entries.forEach((entry) => {
+          const experiment = accepted.get(entry.request?.experiment_id);
+          if (!experiment) return;
+          entry.submitted = true;
+          entry.status = experiment.status;
+          entry.slurm_job_id = experiment.slurm_job_id || "";
+          entry.manifest = experiment.manifest || {};
+        });
+        replaceSubmissionSet(entries);
+        widgetStates.submissionSetStatus = {
+          status: "accepted", count: accepted.size,
+        };
+        savePresentation();
+        await refreshState();
+      } catch (error) {
+        const failure = error.payload?.error?.submission || {};
+        const failed = entries.find((entry) =>
+          entry.request?.experiment_id === failure.experiment_id)
+          || staged[Number(failure.index)];
+        if (failed) {
+          failed.status = "invalid";
+          failed.error = error.message;
+          widgetStates.submissionSetSelected = failed.draft_id;
+        }
+        replaceSubmissionSet(entries);
+        widgetStates.submissionSetStatus = {
+          status: "failed",
+          error: error.message,
+          draft_id: failed?.draft_id || "",
+        };
+        savePresentation();
+        renderDashboard();
+        publishWidgets();
+      }
+    });
+
+    form.addEventListener("submit", (event) => event.preventDefault());
+    renderSubmissionSet();
+    refreshExperimentSubmissionStatus(form);
     root.append(form);
   }
 

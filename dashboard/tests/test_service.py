@@ -8,7 +8,11 @@ import zipfile
 import pytest
 
 from qfw_slurm_dashboard.runner import CommandResult
-from qfw_slurm_dashboard.service import DashboardService
+from qfw_slurm_dashboard.routes import _error
+from qfw_slurm_dashboard.service import (
+    DashboardService,
+    SubmissionSetValidationError,
+)
 from qfw_slurm_dashboard.models import Experiment, Operation
 
 
@@ -19,6 +23,21 @@ class ImmediateThread:
 
     def start(self):
         self.target(*self.args)
+
+
+class DeferredThread:
+    started = []
+
+    def __init__(self, target, args, **kwargs):
+        self.target = target
+        self.args = args
+
+    def start(self):
+        self.started.append(self.args[0].experiment_id)
+
+    @staticmethod
+    def is_alive():
+        return True
 
 
 def service(tmp_path) -> DashboardService:
@@ -301,6 +320,89 @@ def test_submission_writes_and_submits_batch_file(tmp_path) -> None:
     assert experiment.manifest["batch_script_path"] == argv[-1]
     assert experiment.artifacts[-1] == argv[-1]
     assert experiment.slurm_job_id == "42"
+
+
+def test_submission_set_starts_each_validated_experiment(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    first_id = "2440c16e-865b-4a67-834e-dda390a67f32"
+    second_id = "f23bf181-f679-4a18-ae19-b880826ffaba"
+    DeferredThread.started = []
+    with patch("qfw_slurm_dashboard.service.threading.Thread", DeferredThread):
+        experiments = dashboard.submit_experiment_batch({
+            "identity": "user-a",
+            "experiments": [
+                {
+                    "experiment_id": first_id,
+                    "backend": "nwqsim",
+                    "example": "qiskit-simple",
+                },
+                {
+                    "experiment_id": second_id,
+                    "backend": "nwqsim",
+                    "example": "ghz-qiskit",
+                },
+            ],
+        })
+
+    assert [item.experiment_id for item in experiments] == [first_id, second_id]
+    assert DeferredThread.started == [first_id, second_id]
+    assert {
+        item["experiment_id"] for item in dashboard.store.experiments()
+    } == {first_id, second_id}
+
+
+def test_submission_set_validates_every_entry_before_starting_any(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    DeferredThread.started = []
+    with patch("qfw_slurm_dashboard.service.threading.Thread", DeferredThread):
+        with pytest.raises(
+            SubmissionSetValidationError, match="iterations"
+        ) as captured:
+            dashboard.submit_experiment_batch({
+                "identity": "user-a",
+                "experiments": [
+                    {
+                        "experiment_id": "9cd164b7-c453-42a9-8930-ef7521d2d882",
+                        "backend": "nwqsim",
+                        "example": "qiskit-simple",
+                    },
+                    {
+                        "experiment_id": "bce23286-cf07-483c-a85d-63cfa5b3a1da",
+                        "backend": "nwqsim",
+                        "example": "ghz-qiskit",
+                        "application_parameters": {
+                            "qubits": 4,
+                            "iterations": 0,
+                        },
+                    },
+                    {
+                        "experiment_id": "6326bd8f-58a4-4244-a99e-ee70d68671e2",
+                        "backend": "nwqsim",
+                        "example": "supermarq",
+                    },
+                ],
+            })
+
+    assert captured.value.index == 1
+    assert captured.value.experiment_id == (
+        "bce23286-cf07-483c-a85d-63cfa5b3a1da"
+    )
+    assert DeferredThread.started == []
+    assert dashboard.store.experiments() == []
+
+
+def test_submission_set_error_response_identifies_invalid_entry() -> None:
+    response = _error(SubmissionSetValidationError(
+        2,
+        "bce23286-cf07-483c-a85d-63cfa5b3a1da",
+        "iterations outside permitted range",
+    ))
+
+    assert response.status == 400
+    assert response.payload["error"]["submission"] == {
+        "index": 2,
+        "experiment_id": "bce23286-cf07-483c-a85d-63cfa5b3a1da",
+    }
 
 
 def test_submission_forwards_validated_application_parameters(tmp_path) -> None:

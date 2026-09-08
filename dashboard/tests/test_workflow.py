@@ -97,12 +97,31 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "Math.max(0.35" not in frontend
     assert "Loading live topology sources:" in frontend
     assert "refreshExperimentSubmissionStatus" in frontend
-    assert 'tracked.experiment_id && state.schema === "qfw-dashboard-v1"' in frontend
+    assert "function visibleSubmissionSetEntries()" in frontend
+    assert "item.experiment_id === entry.request?.experiment_id" in frontend
+    assert 'statusNode.textContent = rowStatus;' in frontend
     assert 'terminal.textContent = [' in frontend
     assert 'submission.result?.output_tail' in frontend
     assert 'previewOutput.dataset.qfwSubmissionOutput = ""' in frontend
-    assert "Sending request to Slurm" in frontend
-    assert "qfwSubmitApplication" in frontend
+    assert "Submitting ${staged.length} applications" in frontend
+    assert "qfwSubmitSet" in frontend
+    assert 'const requestPending = batchStatus.status === "requesting";' in frontend
+    assert "submit.disabled = requestPending || editing || staged.length === 0;" in frontend
+    assert "submit.disabled = active;" not in frontend
+    assert '"Add to Submission Set"' in frontend
+    assert '"Submit All (0)"' in frontend
+    assert 'iconButton("view", "View application")' in frontend
+    assert 'iconButton("edit", "Edit application")' in frontend
+    assert 'iconButton("save", "Save application changes")' in frontend
+    assert 'iconButton("cancel", "Cancel application changes")' in frontend
+    assert 'iconButton("trash", "Remove application")' in frontend
+    assert 'request("/api/qfw-dashboard/experiments/batch"' in frontend
+    assert "error.payload = payload;" in frontend
+    assert 'failed.status = "invalid";' in frontend
+    assert "widgetStates.submissionSetSelected = failed.draft_id;" in frontend
+    assert 'entry.status = "staged";' in frontend
+    assert "delete entry.error;" in frontend
+    assert "Validation error for ${invalid.request?.example" in frontend
     assert 'name !== "qfw-services"' in frontend
     assert 'job.job_name || "Slurm job"' in frontend
     assert "qfw-topology-state-" in frontend

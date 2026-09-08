@@ -66,15 +66,20 @@ def main() -> int:
         required = (
             ">QFw Slurm Cluster</option>",
             ">Dashboard</option>",
+            ">AI Agent</option>",
             ">Progress</option>",
             ">File</option>",
             ">Shell</option>",
+            'class="shell qfw-slurm-cluster-workflow side-sheet-collapsed"',
             'class="qfw-canvas-viewport"',
             'class="qfw-widget-chevron"',
             ">Cluster control<",
             ">Service control<",
             ">Node control<",
             ">Cluster access<",
+            ">Submission Set<",
+            ">Add to Submission Set<",
+            ">Submit All (0)<",
         )
         missing = [value for value in required if value not in html]
         forbidden = (
@@ -97,7 +102,7 @@ def main() -> int:
             print(f"unexpected: {present}")
             print(f"missing widgets: {missing_widgets}")
             return 1
-        print("PASS: four-pane workflow and fixed dashboard widgets rendered")
+        print("PASS: five-pane workflow and fixed dashboard widgets rendered")
         return 0
 
 
