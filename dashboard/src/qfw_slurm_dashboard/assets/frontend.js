@@ -3,24 +3,59 @@
 
   const WORKFLOW_ID = "qfw-slurm-cluster";
   const IDENTITIES = ["user-a", "user-b", "user-c", "root"];
-  const WIDGETS = [
-    ["health", "Cluster health"],
-    ["inventory", "Version and configuration inventory"],
-    ["cluster-control", "Cluster control"],
-    ["service-control", "Service control"],
-    ["node-control", "Node control"],
-    ["cluster-access", "Cluster access"],
-    ["nodes", "Nodes"],
-    ["services", "Services"],
-    ["allocations", "Allocations"],
-    ["experiments", "Experiments"],
-    ["topology", "Topology"],
-    ["results", "Result summary"],
-    ["alerts", "Alerts"],
+  const WIDGET_GROUPS = [
+    {
+      id: "operations",
+      label: "Operations",
+      widgets: [
+        ["cluster-control", "Cluster control"],
+        ["service-control", "Service control"],
+        ["node-control", "Node control"],
+        ["cluster-access", "Cluster access"],
+      ],
+    },
+    {
+      id: "experiments",
+      label: "Experiments and results",
+      widgets: [
+        ["experiments", "Running Experiments"],
+        ["results", "Result summary"],
+      ],
+      experimentLauncher: true,
+    },
+    {
+      id: "allocations",
+      label: "Allocations and service topology",
+      widgets: [
+        ["allocations", "Allocations"],
+        ["services", "Services"],
+        ["topology", "Topology", "wide"],
+      ],
+    },
+    {
+      id: "infrastructure",
+      label: "Cluster state and configuration",
+      widgets: [
+        ["health", "Cluster health"],
+        ["inventory", "Version and configuration inventory"],
+        ["nodes", "Nodes"],
+        ["alerts", "Alerts"],
+      ],
+    },
   ];
+  const WIDGETS = WIDGET_GROUPS.flatMap((group) => group.widgets);
   const NON_FILTERABLE_WIDGETS = new Set([
     "cluster-control", "service-control", "node-control", "cluster-access",
   ]);
+  const OPERATION_WIDGET_GROUPS = {
+    "cluster-control": "cluster",
+    "service-control": "services",
+    "node-control": "nodes",
+  };
+  const JOB_COLORS = [
+    "#32d6c5", "#75d982", "#54b8ff", "#8fa3ff", "#c893ff",
+    "#ef8fd2", "#e6dc68", "#68d8f0", "#a8dc72", "#d4a5ff",
+  ];
   let runtimeApi = null;
   let activeIdentity = "user-a";
   let state = { health: "unavailable", sources: {}, operations: [], experiments: [] };
@@ -33,10 +68,20 @@
   let progressPaused = false;
   let dashboardRoot = null;
   let originalStatusOutput = null;
+  const dashboardMirrors = new Set();
+  let activeCanvasPans = 0;
+  let dashboardRenderPending = false;
+  const pendingOperationGroups = new Set();
+  const pendingAbortGroups = new Set();
   let widgetChannel = null;
   let widgetStates = {};
+  let selectedDashboardWidget = null;
+  let selectedExperimentPhase = null;
+  let dashboardResetGeneration = 0;
+  let dashboardResetStatus = "idle";
+  const nonPrimarySelectionPointers = new Set();
   const popupWindows = new Map();
-  const notifiedTerminal = new Set();
+  const activeDashboardDialogs = new Set();
 
   function contextId() {
     return String(runtimeApi?.state.contextId || "detached");
@@ -83,6 +128,61 @@
     return payload;
   }
 
+  function clearClientDashboardState() {
+    dashboardResetGeneration += 1;
+    window.localStorage.removeItem(storageKey());
+    widgetStates = {};
+    Object.keys(selectedOperations).forEach((key) => delete selectedOperations[key]);
+    pendingOperationGroups.clear();
+    pendingAbortGroups.clear();
+    eventCursor = 0;
+    Object.keys(logCursors).forEach((key) => delete logCursors[key]);
+    progressEvents = [];
+    progressPaused = false;
+    progressIdentity = activeIdentity;
+    selectedDashboardWidget = null;
+    selectedExperimentPhase = null;
+    state = {
+      ...state,
+      operations: [],
+      experiments: [],
+      running_experiments: [],
+    };
+    window.ElectroBoyFrontend.invokeModule("progress", "clearProgressOutput");
+    widgetChannel?.postMessage({ type: "reset" });
+  }
+
+  async function clearDashboardState() {
+    if (activeIdentity !== "root") {
+      throw new Error("clearing Dashboard state requires the root identity");
+    }
+    if (!await confirmDashboardAction(
+      "Clear Dashboard state",
+      "Clear saved Dashboard operations, experiments, events, progress, and layout? "
+        + "This does not cancel Slurm jobs, release reservations, stop services, "
+        + "delete logs, or change credentials.",
+      { severity: "danger", confirmLabel: "Clear Dashboard state" },
+    )) return;
+    dashboardResetStatus = "running";
+    renderDashboard();
+    publishWidgets();
+    try {
+      await request("/api/qfw-dashboard/reset", {
+        method: "POST",
+        body: JSON.stringify({ identity: activeIdentity }),
+      });
+      clearClientDashboardState();
+      dashboardResetStatus = "succeeded";
+      renderDashboard();
+      await refreshState();
+    } catch (error) {
+      dashboardResetStatus = "failed";
+      renderDashboard();
+      publishWidgets();
+      await notifyDashboard("Dashboard reset failed", error.message, "danger");
+    }
+  }
+
   function selectedSource(name) {
     return state.sources?.[name] || {
       name, status: "unavailable", records: [], error: "source has not been observed",
@@ -96,8 +196,206 @@
     return node;
   }
 
+  function preserveScroll(node) {
+    node.dataset.qfwPreserveScroll = "";
+    return node;
+  }
+
+  function showDashboardOverlay({
+    title, message, severity = "info", confirmLabel = "Dismiss", cancelLabel = "",
+  }) {
+    return new Promise((resolve) => {
+      const previousFocus = document.activeElement;
+      const overlay = element(
+        "div", `qfw-notification-overlay qfw-notification-${severity}`,
+      );
+      const dialog = element("section", "qfw-notification-dialog");
+      dialog.setAttribute("role", cancelLabel ? "alertdialog" : "dialog");
+      dialog.setAttribute("aria-modal", "true");
+      const heading = element("header", "qfw-notification-header");
+      heading.append(
+        element("span", "qfw-notification-indicator", severity.toUpperCase()),
+        element("h2", "", title),
+      );
+      const body = element("p", "qfw-notification-message", message);
+      const actions = element("footer", "qfw-notification-actions");
+      const confirm = element("button", "qfw-notification-confirm", confirmLabel);
+      confirm.type = "button";
+      let cancel = null;
+      if (cancelLabel) {
+        cancel = element("button", "qfw-notification-cancel", cancelLabel);
+        cancel.type = "button";
+        actions.append(cancel);
+      }
+      actions.append(confirm);
+      dialog.append(heading, body, actions);
+      overlay.append(dialog);
+
+      function finish(accepted) {
+        document.removeEventListener("keydown", onKeyDown, true);
+        activeDashboardDialogs.delete(finish);
+        overlay.remove();
+        if (previousFocus instanceof HTMLElement && previousFocus.isConnected) {
+          previousFocus.focus({ preventScroll: true });
+        }
+        resolve(accepted);
+      }
+
+      function onKeyDown(event) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finish(false);
+        }
+      }
+
+      confirm.addEventListener("click", () => finish(true));
+      cancel?.addEventListener("click", () => finish(false));
+      overlay.addEventListener("pointerdown", (event) => {
+        if (event.target === overlay) finish(false);
+      });
+      document.addEventListener("keydown", onKeyDown, true);
+      activeDashboardDialogs.add(finish);
+      document.body.append(overlay);
+      window.requestAnimationFrame(() => confirm.focus({ preventScroll: true }));
+    });
+  }
+
+  function confirmDashboardAction(title, message, options = {}) {
+    return showDashboardOverlay({
+      title,
+      message,
+      severity: options.severity || "warning",
+      confirmLabel: options.confirmLabel || "Continue",
+      cancelLabel: options.cancelLabel || "Cancel",
+    });
+  }
+
+  function notifyDashboard(title, message, severity = "info") {
+    return showDashboardOverlay({ title, message, severity });
+  }
+
+  function selectServiceLogs(service) {
+    if (activeIdentity !== "root") {
+      return notifyDashboard(
+        "Service logs restricted",
+        "Select the root cluster identity to inspect service logs.",
+        "danger",
+      );
+    }
+    runtimeApi.layout.showProgressPane();
+    const pane = runtimeApi.elements.progressOutputPane;
+    const mode = pane.querySelector("[data-qfw-filter=mode]");
+    const source = pane.querySelector("[data-qfw-filter=source]");
+    const component = pane.querySelector("[data-qfw-filter=component]");
+    progressIdentity = "root";
+    if (mode) mode.value = "logs";
+    if (source && service.log_source) source.value = service.log_source;
+    if (component && service.log_component) component.value = service.log_component;
+    [mode, source, component].filter(Boolean).forEach((control) => {
+      control.dispatchEvent(new Event("input"));
+      control.dispatchEvent(new Event("change"));
+    });
+    void refreshEvents();
+  }
+
+  function showFailedService(service) {
+    const overlay = element("div", "qfw-notification-overlay qfw-notification-danger");
+    const dialog = element("section", "qfw-notification-dialog qfw-service-failure-dialog");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    const heading = element("header", "qfw-notification-header");
+    heading.append(
+      element("span", "qfw-notification-indicator", "FAILED"),
+      element("h2", "", service.id),
+    );
+    const detail = element("dl", "qfw-service-failure-detail");
+    [
+      ["Role", service.role],
+      ["Node", service.parent],
+      ["State", service.state],
+      ["Error", service.detail || "No error detail was reported."],
+    ].forEach(([label, value]) => {
+      detail.append(element("dt", "", label), element("dd", "", value || "—"));
+    });
+    const actions = element("footer", "qfw-notification-actions");
+    const view = element("button", "", "View logs");
+    const download = element("button", "", "Download logs");
+    const close = element("button", "qfw-notification-confirm", "Close");
+    [view, download, close].forEach((button) => { button.type = "button"; });
+    const allowed = activeIdentity === "root";
+    view.disabled = !allowed || !service.log_source;
+    download.disabled = !allowed;
+    const finish = () => {
+      document.removeEventListener("keydown", onKeyDown, true);
+      activeDashboardDialogs.delete(finish);
+      overlay.remove();
+    };
+    function onKeyDown(event) {
+      if (event.key === "Escape") finish();
+    }
+    view.addEventListener("click", () => {
+      finish();
+      void selectServiceLogs(service);
+    });
+    download.addEventListener("click", async () => {
+      download.disabled = true;
+      try {
+        const payload = await request(
+          "/api/qfw-dashboard/services/archive"
+            + `?service_id=${encodeURIComponent(service.id)}`
+            + `&identity=${encodeURIComponent(activeIdentity)}`,
+        );
+        downloadBase64(payload);
+      } catch (error) {
+        await notifyDashboard("Diagnostic download failed", error.message, "danger");
+      } finally {
+        download.disabled = !allowed;
+      }
+    });
+    close.addEventListener("click", finish);
+    overlay.addEventListener("pointerdown", (event) => {
+      if (event.target === overlay) finish();
+    });
+    actions.append(view, download, close);
+    dialog.append(heading, detail, actions);
+    overlay.append(dialog);
+    document.addEventListener("keydown", onKeyDown, true);
+    activeDashboardDialogs.add(finish);
+    document.body.append(overlay);
+    close.focus({ preventScroll: true });
+  }
+
+  function downloadBase64(payload) {
+    const bytes = Uint8Array.from(
+      atob(payload.content_base64),
+      (character) => character.charCodeAt(0),
+    );
+    const anchor = document.createElement("a");
+    const url = URL.createObjectURL(new Blob(
+      [bytes], { type: payload.mime_type || "application/octet-stream" },
+    ));
+    anchor.href = url;
+    anchor.download = payload.name;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  function jobColor(jobId) {
+    let hash = 2166136261;
+    for (const character of String(jobId)) {
+      hash ^= character.charCodeAt(0);
+      hash = Math.imul(hash, 16777619) >>> 0;
+    }
+    return JOB_COLORS[hash % JOB_COLORS.length];
+  }
+
+  function topologyState(value) {
+    return String(value || "unknown").toLowerCase().match(/^[a-z0-9_-]+/)?.[0]
+      || "unknown";
+  }
+
   function table(records, columns) {
-    const wrapper = element("div", "qfw-table-wrap");
+    const wrapper = preserveScroll(element("div", "qfw-table-wrap"));
     const value = element("table", "qfw-table");
     const head = element("thead");
     const header = element("tr");
@@ -137,6 +435,103 @@
     return wrapper;
   }
 
+  function experimentTable(records, results) {
+    const wrapper = preserveScroll(element("div", "qfw-table-wrap"));
+    const value = element("table", "qfw-table");
+    const head = element("thead");
+    const header = element("tr");
+    const columns = [
+      ["experiment_id", "Experiment"],
+      ["identity", "User"],
+      ["backend", "Backend"],
+      ["example", "Example"],
+      ["status", "State"],
+      ["slurm_job_id", "Job"],
+      ["action", results ? "Download" : "Action"],
+    ];
+    columns.forEach(([, label]) => header.append(element("th", "", label)));
+    head.append(header);
+    const body = element("tbody");
+    records.forEach((experiment) => {
+      const row = element("tr");
+      columns.slice(0, -1).forEach(([key]) => {
+        row.append(element("td", "", experiment[key] ?? "—"));
+      });
+      const action = element("td");
+      if (results) {
+        const download = element("button", "", "Download ZIP");
+        download.type = "button";
+        download.addEventListener("click", async () => {
+          try {
+            const payload = await request(
+              "/api/qfw-dashboard/experiments/archive"
+                + `?experiment_id=${encodeURIComponent(experiment.experiment_id)}`
+                + `&identity=${encodeURIComponent(activeIdentity)}`,
+            );
+            downloadBase64(payload);
+          } catch (error) {
+            await notifyDashboard("Download failed", error.message, "danger");
+          }
+        });
+        action.append(download);
+      } else if (experiment.slurm_job_id) {
+        const cancel = element("button", "danger", "Cancel");
+        cancel.type = "button";
+        cancel.addEventListener("click", async () => {
+          if (!await confirmDashboardAction(
+            "Cancel experiment",
+            `Cancel ${experiment.experiment_id}? Its Slurm allocation will be terminated.`,
+            { severity: "danger", confirmLabel: "Cancel experiment" },
+          )) return;
+          try {
+            await request("/api/qfw-dashboard/experiments/cancel", {
+              method: "POST",
+              body: JSON.stringify({
+                experiment_id: experiment.experiment_id,
+                identity: activeIdentity,
+              }),
+            });
+          } catch (error) {
+            await notifyDashboard("Cancellation failed", error.message, "danger");
+          }
+        });
+        action.append(cancel);
+      } else {
+        action.textContent = "—";
+      }
+      row.append(action);
+      body.append(row);
+    });
+    if (!records.length) {
+      const row = element("tr");
+      const cell = element("td", "qfw-empty", "No records");
+      cell.colSpan = columns.length;
+      row.append(cell);
+      body.append(row);
+    }
+    value.append(head, body);
+    wrapper.append(value);
+    return wrapper;
+  }
+
+  function combinedServiceRecords(catalog, managed) {
+    const records = new Map();
+    const key = (item) => `${item.service_id}:${item.node || item.component || ""}`;
+    managed.forEach((item) => {
+      if (!item.service_id) return;
+      records.set(key(item), { ...item });
+    });
+    catalog.forEach((item) => {
+      if (!item.service_id) return;
+      records.set(key(item), {
+        ...(records.get(key(item)) || {}),
+        ...item,
+      });
+    });
+    return [...records.values()].sort((left, right) =>
+      String(left.service_id).localeCompare(String(right.service_id)));
+  }
+
   function widgetPayload(id) {
     const docker = selectedSource("docker");
     const slurm = selectedSource("slurm");
@@ -157,16 +552,21 @@
     }
     if (id === "inventory") return selectedSource("inventory").records;
     if (id === "nodes") return slurm.records.filter((item) => item.kind === "node");
-    if (id === "services") return services.records;
+    if (id === "services") {
+      return combinedServiceRecords(services.records, servicePlane.records);
+    }
     if (id === "allocations") {
       return [
         ...slurm.records.filter((item) => item.kind === "job"),
         ...allocations.records,
       ];
     }
-    if (id === "experiments") return state.experiments || [];
+    if (id === "experiments") return state.running_experiments || [];
     if (id === "results") {
-      return (state.experiments || []).filter((item) => item.result || item.completed_at);
+      return (state.experiments || []).filter((item) =>
+        Boolean(item.completed_at)
+        && item.result
+        && Object.keys(item.result).length > 0);
     }
     if (id === "alerts") {
       return Object.values(state.sources || {})
@@ -185,9 +585,15 @@
           ...slurm.records.filter((item) => item.kind === "job"),
           ...allocations.records,
         ],
-        services: services.records,
+        services: combinedServiceRecords(services.records, servicePlane.records),
         service_plane: servicePlane.records,
-        experiments: state.experiments || [],
+        experiments: state.running_experiments || [],
+        source_status: {
+          slurm: slurm.status,
+          services: services.status,
+          allocations: allocations.status,
+          service_plane: servicePlane.status,
+        },
       };
     }
     return {};
@@ -217,7 +623,9 @@
         element("span", `qfw-state qfw-${alert.state || "unavailable"}`,
           alert.state || "unavailable"),
       );
-      const detail = element("pre", "qfw-alert-detail");
+      const detail = preserveScroll(element(
+        "pre", "qfw-alert-detail qfw-resizable-text",
+      ));
       detail.textContent = typeof alert.detail === "string"
         ? alert.detail : JSON.stringify(alert.detail, null, 2);
       panel.append(header, detail);
@@ -227,7 +635,7 @@
   }
 
   function renderTopology(payload) {
-    const root = element("div", "qfw-topology");
+    const root = preserveScroll(element("div", "qfw-topology"));
     const controls = element("div", "qfw-inline-controls");
     const projection = element("select");
     projection.className = "qfw-topology-projection";
@@ -251,9 +659,8 @@
     filter.setAttribute("value", filter.value);
     const zoom = element("input");
     zoom.className = "qfw-topology-zoom";
-    zoom.type = "range";
-    zoom.min = "60";
-    zoom.max = "180";
+    zoom.type = "number";
+    zoom.step = "10";
     zoom.value = String(widgetStates.topology?.zoom || 100);
     zoom.setAttribute("value", zoom.value);
     const projectionLabel = element("label", "qfw-control-group", "Projection ");
@@ -263,29 +670,168 @@
     const zoomControlLabel = element("label", "qfw-control-group", "Zoom ");
     zoomControlLabel.append(zoom);
     controls.append(projectionLabel, filterLabel, zoomControlLabel);
-    root.append(controls);
+    const hover = element("div", "qfw-topology-hover");
+    hover.hidden = true;
+    root.append(controls, hover);
+    function showTopologyHover(anchor, event, item, jobs = item.jobs || []) {
+      const title = element(
+        "strong", "qfw-topology-hover-title",
+        `${item.type}: ${item.id}`,
+      );
+      const summary = element(
+        "span", "qfw-topology-hover-summary",
+        `${item.role ? `${item.role} · ` : ""}${item.state || "unknown"}`,
+      );
+      const entries = jobs.map((job) => {
+        const row = element("div", "qfw-topology-hover-job");
+        const swatch = element("span", "qfw-topology-hover-swatch");
+        swatch.style.background = job.color;
+        row.append(
+          swatch,
+          element("span", "", `Job ${job.job_id} · ${job.application}`),
+          element("small", "", `${job.user} · ${job.qpm_state || job.state}`),
+        );
+        return row;
+      });
+      hover.replaceChildren(title, summary, ...entries);
+      hover.hidden = false;
+      const rootBounds = root.getBoundingClientRect();
+      const anchorBounds = anchor.getBoundingClientRect();
+      const clientX = event?.clientX ?? anchorBounds.right;
+      const clientY = event?.clientY ?? anchorBounds.top;
+      const scaleX = root.offsetWidth > 0
+        ? rootBounds.width / root.offsetWidth : 1;
+      const scaleY = root.offsetHeight > 0
+        ? rootBounds.height / root.offsetHeight : 1;
+      const safeScaleX = Number.isFinite(scaleX) && scaleX > 0 ? scaleX : 1;
+      const safeScaleY = Number.isFinite(scaleY) && scaleY > 0 ? scaleY : 1;
+      hover.style.left = `${root.scrollLeft
+        + (clientX - rootBounds.left + 14) / safeScaleX}px`;
+      hover.style.top = `${root.scrollTop
+        + (clientY - rootBounds.top + 14) / safeScaleY}px`;
+    }
+    function hideTopologyHover() {
+      hover.hidden = true;
+    }
+    const pendingSources = Object.entries(payload.source_status || {})
+      .filter(([, status]) => status === "loading")
+      .map(([name]) => name);
+    if (pendingSources.length) {
+      root.append(element(
+        "p", "qfw-topology-loading",
+        `Loading live topology sources: ${pendingSources.join(", ")}`,
+      ));
+    }
+    const slurmJobs = (payload.allocations || []).filter((item) =>
+      item.kind === "job" && item.job_id);
+    const canonicalJobId = (value) => String(value || "").split("+")[0];
+    const jobDetails = new Map();
+    slurmJobs.forEach((job) => {
+      const jobId = canonicalJobId(job.job_id);
+      const current = jobDetails.get(jobId) || {};
+      jobDetails.set(jobId, {
+        job_id: jobId,
+        application: current.application || job.job_name || "Slurm job",
+        user: current.user || job.user || "unknown",
+        state: job.state || current.state || "unknown",
+        color: jobColor(jobId),
+      });
+    });
+    function nodeHasJob(node, job) {
+      const nodeList = String(job.nodes || "");
+      if (!nodeList || nodeList.startsWith("(")) return false;
+      if (nodeList.split(",").includes(node)) return true;
+      const match = node.match(/^(.*?)(\d+)$/);
+      if (!match) return false;
+      const [, prefix, numberText] = match;
+      const bracket = nodeList.match(new RegExp(
+        `^${prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\[([^\\]]+)\\]$`,
+      ));
+      if (!bracket) return false;
+      const number = Number(numberText);
+      return bracket[1].split(",").some((part) => {
+        const [first, last = first] = part.split("-").map(Number);
+        return number >= first && number <= last;
+      });
+    }
+    const topologyServices = new Map();
+    (payload.services || []).forEach((item) => {
+      const serviceId = item.service_id || item.name;
+      if (!serviceId) return;
+      const current = topologyServices.get(serviceId);
+      const primaryNode = item.assigned_hosts?.[0];
+      if (!current || item.node === primaryNode) topologyServices.set(serviceId, item);
+    });
+    const serviceRoles = {
+      directory: ["Directory Service", "directory"],
+      gateway: ["Slurm Gateway", "gateway"],
+      dvm: ["PRTE DVM", "dvm"],
+    };
+    const qpmJobs = new Map();
+    (payload.allocations || []).filter((item) =>
+      Array.isArray(item.allocations)).forEach((allocation) => {
+      const jobId = canonicalJobId(allocation.job_id);
+      if (!jobId) return;
+      const detail = jobDetails.get(jobId) || {
+        job_id: jobId,
+        application: "Slurm job",
+        user: allocation.user || "unknown",
+        state: allocation.state || "unknown",
+        color: jobColor(jobId),
+      };
+      allocation.allocations.forEach((reservation) => {
+        const serviceId = reservation.service_id;
+        if (!serviceId) return;
+        if (!qpmJobs.has(serviceId)) qpmJobs.set(serviceId, new Map());
+        qpmJobs.get(serviceId).set(jobId, {
+          ...detail,
+          qpm_state: reservation.state || allocation.qstate || "unknown",
+        });
+      });
+    });
+    const clusterNodes = new Map();
+    clusterNodes.set("slurmctld", {
+      type: "node", id: "slurmctld", state: "registered",
+      role: "Slurm controller",
+    });
+    (payload.nodes || []).forEach((item) => {
+      const jobs = slurmJobs.filter((job) => nodeHasJob(item.node, job))
+        .map((job) => jobDetails.get(canonicalJobId(job.job_id)))
+        .filter((job, index, values) => job
+          && values.findIndex((value) => value.job_id === job.job_id) === index);
+      clusterNodes.set(item.node, {
+        type: "node", id: item.node, state: item.state,
+        partition: String(item.partition || "").replace(/\*$/, ""),
+        activity: jobs.map((job) => (
+          `${job.application} [${job.job_id}] · ${job.state} · ${job.user}`
+        )).join("\n"),
+        jobs,
+      });
+    });
     const objects = projection.value === "cluster"
       ? [
-          { type: "controller", id: "slurmctld", state: "registered" },
-          ...[...new Set((payload.nodes || []).map((item) => item.partition))]
-            .filter(Boolean).map((id) => ({
-              type: "partition", id, state: "configured", parent: "slurmctld",
-            })),
-          ...(payload.nodes || []).map((item) => ({
-            type: "node", id: item.node, state: item.state, parent: item.partition,
-          })),
-          ...(payload.services || []).map((item) => ({
-            type: "service",
-            id: item.service_id || item.name,
-            state: item.state || item.status,
-            parent: item.node || "slurmctld",
-          })),
-          ...(payload.service_plane || []).map((item) => ({
-            type: item.component === "dvm" ? "dvm" : item.component,
-            id: item.component,
-            state: item.state,
-            parent: item.component === "dvm" ? "nwqsim" : "slurmctld",
-          })),
+          ...clusterNodes.values(),
+          ...[...topologyServices.values()].map((item) => {
+            const [role, logComponent] = serviceRoles[item.component]
+              || ["QPMd", "qpmd"];
+            return {
+              type: "service",
+              id: item.service_id || item.name,
+              role,
+              log_component: logComponent,
+              log_source: {
+                "directory-service": "directory",
+                "qfw-slurm-gateway": "gateway",
+                "nwqsim-dvm": "nwqsim-dvm",
+                nwqsim: "nwqsim-qpm",
+                "iqm-ornl-20q": "iqm-qpm",
+              }[item.service_id || item.name] || "",
+              jobs: [...(qpmJobs.get(item.service_id || item.name)?.values() || [])],
+              state: item.state || item.status,
+              detail: item.detail || item.error || "",
+              parent: item.node || "slurmctld",
+            };
+          }),
         ]
       : (payload.experiments || []).flatMap((item) => {
           const jobs = (payload.allocations || []).filter((job) =>
@@ -340,44 +886,147 @@
       || JSON.stringify(item).toLowerCase().includes(filter.value.toLowerCase()));
     const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
     svg.classList.add("qfw-topology-graph");
-    svg.setAttribute("viewBox", "0 0 900 500");
     svg.style.width = `${Number(zoom.value)}%`;
-    const positions = new Map(visibleObjects.map((item, index) => [item.id, {
-      x: 35 + (index % 4) * 215,
-      y: 35 + Math.floor(index / 4) * 100,
-    }]));
+    const positions = new Map();
+    const partitionFrames = [];
+    let graphHeight = 500;
+    if (projection.value === "cluster") {
+      const objectsById = new Map(objects.map((item) => [item.id, item]));
+      const partitionCache = new Map();
+      function objectPartition(item, visited = new Set()) {
+        if (!item || visited.has(item.id)) return "";
+        if (item.partition) return item.partition;
+        if (partitionCache.has(item.id)) return partitionCache.get(item.id);
+        visited.add(item.id);
+        const resolved = objectPartition(objectsById.get(item.parent), visited);
+        partitionCache.set(item.id, resolved);
+        return resolved;
+      }
+      const partitioned = new Map();
+      const unpartitioned = [];
+      visibleObjects.forEach((item) => {
+        const partition = objectPartition(item);
+        item.partition = partition;
+        if (!partition) {
+          unpartitioned.push(item);
+          return;
+        }
+        if (!partitioned.has(partition)) partitioned.set(partition, []);
+        partitioned.get(partition).push(item);
+      });
+      const controller = unpartitioned.find((item) => item.type === "controller");
+      if (controller) positions.set(controller.id, { x: 357, y: 25 });
+      const controllerObjects = unpartitioned.filter((item) => item !== controller);
+      controllerObjects.forEach((item, index) => positions.set(item.id, {
+        x: 35 + (index % 4) * 215,
+        y: 110 + Math.floor(index / 4) * 90,
+      }));
+      let partitionY = controllerObjects.length
+        ? 125 + Math.ceil(controllerObjects.length / 4) * 90 : 115;
+      [...partitioned.entries()].sort(([left], [right]) =>
+        left.localeCompare(right)).forEach(([partition, items], partitionIndex) => {
+        items.sort((left, right) => {
+          const typeOrder = { node: 0, job: 1, service: 2, dvm: 3 };
+          return (typeOrder[left.type] ?? 4) - (typeOrder[right.type] ?? 4)
+            || String(left.id).localeCompare(String(right.id));
+        });
+        const rows = Math.max(1, Math.ceil(items.length / 4));
+        const frame = {
+          id: partition,
+          x: 20,
+          y: partitionY,
+          width: 860,
+          height: 58 + rows * 84,
+          index: partitionIndex,
+        };
+        partitionFrames.push(frame);
+        items.forEach((item, index) => positions.set(item.id, {
+          x: frame.x + 22 + (index % 4) * 205,
+          y: frame.y + 50 + Math.floor(index / 4) * 84,
+        }));
+        partitionY += frame.height + 24;
+      });
+      graphHeight = Math.max(500, partitionY + 20);
+    } else {
+      visibleObjects.forEach((item, index) => positions.set(item.id, {
+        x: 35 + (index % 4) * 215,
+        y: 35 + Math.floor(index / 4) * 100,
+      }));
+      graphHeight = Math.max(500, 135 + Math.ceil(visibleObjects.length / 4) * 100);
+    }
+    svg.setAttribute("viewBox", `0 0 900 ${graphHeight}`);
+    partitionFrames.forEach((frame) => {
+      const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.classList.add(
+        "qfw-topology-partition",
+        `qfw-topology-partition-${frame.index % 4}`,
+      );
+      const box = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      box.classList.add("qfw-topology-partition-box");
+      box.setAttribute("x", String(frame.x));
+      box.setAttribute("y", String(frame.y));
+      box.setAttribute("width", String(frame.width));
+      box.setAttribute("height", String(frame.height));
+      box.setAttribute("rx", "14");
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      label.classList.add("qfw-topology-partition-label");
+      label.setAttribute("x", String(frame.x + 18));
+      label.setAttribute("y", String(frame.y + 28));
+      label.textContent = `PARTITION · ${frame.id}`;
+      group.append(box, label);
+      svg.append(group);
+    });
     visibleObjects.forEach((item) => {
       const source = positions.get(item.parent);
       const target = positions.get(item.id);
       if (!source || !target) return;
+      const parentObject = objects.find((candidate) => candidate.id === item.parent);
       const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
       line.setAttribute("x1", String(source.x + 92));
       line.setAttribute("y1", String(source.y + 32));
       line.setAttribute("x2", String(target.x + 92));
       line.setAttribute("y2", String(target.y + 32));
-      line.setAttribute("class", "qfw-topology-edge");
+      const serviceEdge = item.type === "service" || parentObject?.type === "service";
+      line.setAttribute(
+        "class",
+        `qfw-topology-edge ${serviceEdge
+          ? "qfw-topology-edge-service" : "qfw-topology-edge-object"}`,
+      );
       svg.append(line);
     });
-    visibleObjects.forEach((item, index) => {
+    visibleObjects.forEach((item) => {
+      const position = positions.get(item.id);
+      if (!position) return;
       const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-      const column = index % 4;
-      const row = Math.floor(index / 4);
-      group.setAttribute("transform", `translate(${35 + column * 215} ${35 + row * 100})`);
+      group.setAttribute("transform", `translate(${position.x} ${position.y})`);
       group.setAttribute("tabindex", "0");
       group.setAttribute("role", "button");
       group.dataset.objectId = item.id;
+      group.classList.add(
+        "qfw-topology-object",
+        `qfw-topology-state-${topologyState(item.state)}`,
+      );
+      if (item.type === "service") group.classList.add("qfw-topology-service");
+      if (item.activity) group.classList.add("has-activity");
+      if (item.jobs?.length && item.type !== "service") {
+        group.classList.add("qfw-topology-job-active");
+        group.style.setProperty("--qfw-job-color", item.jobs[0].color);
+      }
       const box = document.createElementNS("http://www.w3.org/2000/svg", "rect");
       box.setAttribute("width", "185");
       box.setAttribute("height", "64");
-      box.setAttribute("rx", "8");
+      box.setAttribute("rx", item.type === "service" ? "16" : "8");
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      label.setAttribute("x", "10");
+      label.setAttribute("x", item.type === "service" ? "92.5" : "10");
       label.setAttribute("y", "25");
+      if (item.type === "service") label.setAttribute("text-anchor", "middle");
       label.textContent = `${item.type}: ${item.id}`;
       const status = document.createElementNS("http://www.w3.org/2000/svg", "text");
-      status.setAttribute("x", "10");
+      status.setAttribute("x", item.type === "service" ? "92.5" : "10");
       status.setAttribute("y", "48");
-      status.textContent = item.state || "unknown";
+      if (item.type === "service") status.setAttribute("text-anchor", "middle");
+      status.textContent = item.role
+        ? `${item.role} · ${item.state || "unknown"}` : item.state || "unknown";
       const select = () => {
         widgetStates.topology = { ...widgetStates.topology, selected: item.id };
         savePresentation();
@@ -393,7 +1042,8 @@
             "provider-job": "provider", "experiment": "application",
             "result": "application", "artifact": "application",
           };
-          component.value = mapping[item.type] || "";
+          const serviceComponent = item.type === "service" ? item.log_component : "";
+          component.value = serviceComponent || mapping[item.type] || "";
           component.dispatchEvent(new Event("change"));
         }
         if (contextFilter && [...contextFilter.options]
@@ -402,20 +1052,64 @@
           renderProgress();
         }
         if (item.type === "result" || item.type === "artifact") {
-          const resultWidget = dashboardRoot.querySelector("[data-widget=results]");
+          const resultWidget = root.closest(".qfw-dashboard")
+            ?.querySelector("[data-widget=results]");
           if (resultWidget) {
             resultWidget.open = true;
             resultWidget.scrollIntoView({ behavior: "smooth", block: "start" });
           }
         }
+        const failedStates = new Set([
+          "down", "failed", "stopped", "unavailable", "drained", "cancelled",
+        ]);
+        if (item.type === "service"
+          && failedStates.has(topologyState(item.state))) {
+          showFailedService(item);
+        }
         renderDashboard();
         publishWidgets();
       };
+      group.addEventListener("pointerenter", (event) => {
+        showTopologyHover(group, event, item);
+      });
+      group.addEventListener("pointermove", (event) => {
+        showTopologyHover(group, event, item);
+      });
+      group.addEventListener("pointerleave", hideTopologyHover);
+      group.addEventListener("focus", () => showTopologyHover(group, null, item));
+      group.addEventListener("blur", hideTopologyHover);
       group.addEventListener("click", select);
       group.addEventListener("keydown", (event) => {
         if (event.key === "Enter" || event.key === " ") select();
       });
       group.append(box, label, status);
+      if (item.type === "service" && item.jobs?.length
+        && !["down", "failed", "stopped", "unavailable"].includes(
+          topologyState(item.state)
+        )) {
+        const width = 169 / item.jobs.length;
+        item.jobs.forEach((job, jobIndex) => {
+          const stripe = document.createElementNS(
+            "http://www.w3.org/2000/svg", "rect",
+          );
+          stripe.classList.add("qfw-topology-job-stripe");
+          stripe.setAttribute("x", String(8 + jobIndex * width));
+          stripe.setAttribute("y", "56");
+          stripe.setAttribute("width", String(Math.max(2, width - 2)));
+          stripe.setAttribute("height", "5");
+          stripe.setAttribute("rx", "2.5");
+          stripe.style.fill = job.color;
+          stripe.addEventListener("pointerenter", (event) => {
+            event.stopPropagation();
+            showTopologyHover(stripe, event, item, [job]);
+          });
+          stripe.addEventListener("pointermove", (event) => {
+            event.stopPropagation();
+            showTopologyHover(stripe, event, item, [job]);
+          });
+          group.append(stripe);
+        });
+      }
       svg.append(group);
     });
     filter.addEventListener("input", () => {
@@ -425,13 +1119,16 @@
       publishWidgets();
     });
     zoom.addEventListener("input", () => {
+      if (!Number.isFinite(Number(zoom.value)) || Number(zoom.value) <= 0) return;
       widgetStates.topology = { ...widgetStates.topology, zoom: Number(zoom.value) };
       svg.style.width = `${zoom.value}%`;
       savePresentation();
       publishWidgets();
     });
     root.append(svg, table(visibleObjects, [
-      ["type", "Object"], ["id", "Identifier"], ["state", "State"],
+      ["type", "Object"], ["role", "Role"], ["id", "Identifier"],
+      ["state", "State"],
+      ["partition", "Partition"], ["activity", "Active work"],
     ]));
     const selected = visibleObjects.find((item) =>
       item.id === widgetStates.topology?.selected);
@@ -477,111 +1174,8 @@
         ["partition", "Partition"], ["nodes", "Nodes"], ["reason", "Reason"],
       ]);
     }
-    if (id === "experiments" || id === "results") {
-      const root = element("div");
-      root.append(table(payload, [
-        ["experiment_id", "Experiment"], ["identity", "User"],
-        ["backend", "Backend"], ["example", "Example"], ["status", "State"],
-        ["slurm_job_id", "Job"],
-      ]));
-      const selection = [];
-      payload.forEach((experiment) => {
-        const controls = element("div", "qfw-inline-controls");
-        controls.append(element("code", "", experiment.experiment_id));
-        if (!experiment.completed_at && experiment.slurm_job_id) {
-          const cancel = element("button", "danger", "Cancel");
-          cancel.type = "button";
-          cancel.addEventListener("click", async () => {
-            if (!window.confirm(`Cancel ${experiment.experiment_id}?`)) return;
-            await request("/api/qfw-dashboard/experiments/cancel", {
-              method: "POST", body: JSON.stringify({
-                experiment_id: experiment.experiment_id, identity: activeIdentity,
-              }),
-            });
-          });
-          controls.append(cancel);
-        }
-        if (experiment.completed_at) {
-          const details = element("details", "qfw-result-details");
-          details.append(
-            element("summary", "", "Result and reproducibility manifest"),
-            element("pre", "", JSON.stringify({
-              result: experiment.result,
-              reservations: experiment.reservations,
-              artifacts: experiment.artifacts,
-              manifest: experiment.manifest,
-            }, null, 2)),
-          );
-          controls.append(details);
-          (experiment.artifacts || []).forEach((path, index) => {
-            const download = element("button", "", `Download ${path.split("/").pop()}`);
-            download.type = "button";
-            download.addEventListener("click", async () => {
-              try {
-                const payload = await request(
-                  "/api/qfw-dashboard/artifact"
-                    + `?experiment_id=${encodeURIComponent(experiment.experiment_id)}`
-                    + `&index=${index}&identity=${encodeURIComponent(activeIdentity)}`,
-                );
-                const bytes = Uint8Array.from(atob(payload.content_base64),
-                  (character) => character.charCodeAt(0));
-                const anchor = document.createElement("a");
-                anchor.href = URL.createObjectURL(new Blob([bytes]));
-                anchor.download = payload.name;
-                anchor.click();
-                URL.revokeObjectURL(anchor.href);
-              } catch (error) {
-                window.alert(error.message);
-              }
-            });
-            controls.append(download);
-          });
-          const retry = element("button", "", "Retry");
-          retry.type = "button";
-          retry.addEventListener("click", async () => {
-            const hardware = experiment.backend === "iqm";
-            if (hardware && !window.confirm("Retry bounded work on real IQM hardware?")) return;
-            await request("/api/qfw-dashboard/experiments/retry", {
-              method: "POST", body: JSON.stringify({
-                experiment_id: experiment.experiment_id,
-                identity: activeIdentity,
-                submit_real_hardware: hardware,
-              }),
-            });
-          });
-          controls.append(retry);
-          if (id === "results") {
-            const select = element("input");
-            select.type = "checkbox";
-            select.addEventListener("change", () => {
-              if (select.checked) selection.push(experiment.experiment_id);
-              else selection.splice(selection.indexOf(experiment.experiment_id), 1);
-            });
-            controls.append(element("label", "", " Compare "), select);
-          }
-        }
-        root.append(controls);
-      });
-      if (id === "results") {
-        const compare = element("button", "", "Compare selected results");
-        compare.type = "button";
-        const output = element("pre");
-        compare.addEventListener("click", async () => {
-          try {
-            const value = await request("/api/qfw-dashboard/results/compare", {
-              method: "POST", body: JSON.stringify({
-                experiment_ids: selection, identity: activeIdentity,
-              }),
-            });
-            output.textContent = JSON.stringify(value, null, 2);
-          } catch (error) {
-            window.alert(error.message);
-          }
-        });
-        root.append(compare, output);
-      }
-      return root;
-    }
+    if (id === "experiments") return experimentTable(payload, false);
+    if (id === "results") return experimentTable(payload, true);
     if (id === "alerts") {
       return renderAlerts(payload);
     }
@@ -605,7 +1199,11 @@
       "popup=yes,width=1000,height=720,resizable=yes,scrollbars=yes",
     );
     if (!popup) {
-      runtimeApi.notifications.appendOutput("dashboard widget popup was blocked\n", "error");
+      void notifyDashboard(
+        "Pop-out blocked",
+        "The browser blocked the dashboard widget window.",
+        "danger",
+      );
       return;
     }
     popupWindows.set(instanceId, popup);
@@ -618,11 +1216,17 @@
     for (const character of id) {
       pulseHash = ((pulseHash * 33) + character.charCodeAt(0)) >>> 0;
     }
-    const pulseDuration = 10000 + (pulseHash % 6000);
-    const pulsePhase = (Date.now() + (pulseHash * 104729)) % pulseDuration;
-    details.style.setProperty("--qfw-pulse-duration", `${pulseDuration}ms`);
-    details.style.setProperty("--qfw-pulse-delay", `${-pulsePhase}ms`);
+    const traceDuration = 10000 + (pulseHash % 6000);
+    const tracePhase = (Date.now() + (pulseHash * 104729)) % traceDuration;
+    details.style.setProperty("--qfw-border-duration", `${traceDuration}ms`);
+    details.style.setProperty("--qfw-border-delay", `${-tracePhase}ms`);
     details.dataset.widget = id;
+    details.classList.toggle("is-active", id === selectedDashboardWidget);
+    const operationGroup = OPERATION_WIDGET_GROUPS[id];
+    details.classList.toggle(
+      "has-error",
+      Boolean(operationGroup && operationForGroup(operationGroup)?.status === "failed"),
+    );
     details.open = widgetStates[id]?.expanded !== false;
     const summary = element("summary");
     const chevron = element("span", "qfw-widget-chevron", "›");
@@ -664,19 +1268,51 @@
     return details;
   }
 
+  function buildWidgetGroup(group) {
+    const section = element("section", "qfw-widget-group");
+    section.dataset.group = group.id;
+    const heading = element("h3", "qfw-widget-group-title");
+    heading.append(element("span", "", group.label));
+    section.append(heading);
+    const grid = element("div", "qfw-widget-grid");
+    if (group.experimentLauncher) renderExperimentForm(grid);
+    group.widgets.forEach(([id, label, layout]) => {
+      const widget = buildWidget(id, label);
+      if (layout === "wide") widget.classList.add("qfw-grid-wide");
+      grid.append(widget);
+    });
+    section.append(grid);
+    return section;
+  }
+
   function canvasCamera() {
     const saved = widgetStates.canvas || {};
+    const savedScale = Number(saved.scale);
     return {
       x: Number.isFinite(Number(saved.x)) ? Number(saved.x) : 32,
       y: Number.isFinite(Number(saved.y)) ? Number(saved.y) : 32,
-      scale: Math.min(2.25, Math.max(0.35,
-        Number.isFinite(Number(saved.scale)) ? Number(saved.scale) : 1)),
+      scale: Number.isFinite(savedScale) && savedScale > 0 ? savedScale : 1,
     };
   }
 
   function saveCanvasCamera(camera) {
     widgetStates.canvas = { x: camera.x, y: camera.y, scale: camera.scale };
     savePresentation();
+  }
+
+  function scrollableWheelTarget(event, boundary) {
+    return event.composedPath().some((target) => {
+      if (!(target instanceof Element) || target === boundary) return false;
+      if (!boundary.contains(target)) return false;
+      const style = window.getComputedStyle(target);
+      const scrollsVertically = event.deltaY !== 0
+        && /^(auto|scroll)$/.test(style.overflowY)
+        && target.scrollHeight > target.clientHeight;
+      const scrollsHorizontally = event.deltaX !== 0
+        && /^(auto|scroll)$/.test(style.overflowX)
+        && target.scrollWidth > target.clientWidth;
+      return scrollsVertically || scrollsHorizontally;
+    });
   }
 
   function installCanvasInteraction(viewport, stage, zoomLabel) {
@@ -695,7 +1331,8 @@
       const localX = clientX - bounds.left;
       const localY = clientY - bounds.top;
       const previous = camera.scale;
-      const next = Math.min(2.25, Math.max(0.35, previous * factor));
+      const next = previous * factor;
+      if (!Number.isFinite(next) || next <= 0) return;
       const worldX = (localX - camera.x) / previous;
       const worldY = (localY - camera.y) / previous;
       camera.scale = next;
@@ -706,14 +1343,16 @@
     }
 
     viewport.addEventListener("wheel", (event) => {
+      if (scrollableWheelTarget(event, viewport)) return;
       event.preventDefault();
       zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.0015));
     }, { passive: false });
     viewport.addEventListener("pointerdown", (event) => {
-      if (event.button !== 1) return;
+      if (event.button !== 1 || pan) return;
       event.preventDefault();
       pan = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
       viewport.setPointerCapture(event.pointerId);
+      activeCanvasPans += 1;
       viewport.classList.add("is-panning");
     });
     viewport.addEventListener("pointermove", (event) => {
@@ -727,11 +1366,17 @@
     function finishPan(event) {
       if (!pan || pan.pointerId !== event.pointerId) return;
       pan = null;
+      activeCanvasPans = Math.max(0, activeCanvasPans - 1);
       viewport.classList.remove("is-panning");
       saveCanvasCamera(camera);
+      if (!activeCanvasPans && dashboardRenderPending) {
+        dashboardRenderPending = false;
+        window.requestAnimationFrame(renderDashboard);
+      }
     }
     viewport.addEventListener("pointerup", finishPan);
     viewport.addEventListener("pointercancel", finishPan);
+    viewport.addEventListener("lostpointercapture", finishPan);
     viewport.addEventListener("auxclick", (event) => {
       if (event.button === 1) event.preventDefault();
     });
@@ -772,7 +1417,9 @@
       option.value = value;
       control.append(option);
     });
-    control.value = controlValue(widget, name, fallback);
+    const requested = controlValue(widget, name, fallback);
+    control.value = choices.some(([value]) => value === requested)
+      ? requested : fallback;
     control.selectedOptions[0]?.setAttribute("selected", "selected");
     control.addEventListener("change", () => {
       rememberControl(widget, name, control.value);
@@ -810,19 +1457,44 @@
   }
 
   async function runOperation(group, payload) {
-    const response = await request("/api/qfw-dashboard/operations", {
-      method: "POST",
-      body: JSON.stringify({
-        ...payload,
-        identity: activeIdentity,
-        request_id: window.crypto.randomUUID(),
-      }),
-    });
-    selectedOperations[group] = response.operation_id;
-    await refreshState();
+    pendingOperationGroups.add(group);
+    refreshDashboardData();
+    publishWidgets();
+    try {
+      const response = await request("/api/qfw-dashboard/operations", {
+        method: "POST",
+        body: JSON.stringify({
+          ...payload,
+          identity: activeIdentity,
+          request_id: window.crypto.randomUUID(),
+        }),
+      });
+      selectedOperations[group] = response.operation_id;
+      if (pendingAbortGroups.delete(group)) {
+        await request("/api/qfw-dashboard/operations/abort", {
+          method: "POST",
+          body: JSON.stringify({
+            operation_id: response.operation_id,
+            identity: activeIdentity,
+          }),
+        });
+      }
+      await refreshState();
+    } finally {
+      pendingOperationGroups.delete(group);
+      pendingAbortGroups.delete(group);
+      refreshDashboardData();
+      publishWidgets();
+    }
   }
 
   async function abortOperation(group) {
+    if (pendingOperationGroups.has(group)) {
+      pendingAbortGroups.add(group);
+      refreshDashboardData();
+      publishWidgets();
+      return;
+    }
     const operation = operationForGroup(group);
     if (!operation) return;
     await request("/api/qfw-dashboard/operations/abort", {
@@ -837,7 +1509,9 @@
 
   function operationOutput(group) {
     const operation = operationForGroup(group);
-    const output = element("pre", "qfw-operation-output");
+    const output = preserveScroll(element(
+      "pre", "qfw-operation-output qfw-resizable-text",
+    ));
     if (!operation) {
       output.textContent = "No operation has run in this group.";
       return output;
@@ -845,6 +1519,7 @@
     const heading = [
       `${operation.status.toUpperCase()} · ${operation.action}`,
       `target=${operation.target} operation=${operation.operation_id}`,
+      `created=${operation.created_at || "unknown"} completed=${operation.completed_at || "pending"}`,
     ];
     output.textContent = [...heading, ...(operation.output || [])].join("\n");
     output.scrollTop = output.scrollHeight;
@@ -857,48 +1532,118 @@
     run.type = "button";
     run.dataset.qfwAction = "run";
     run.dataset.qfwWidget = widget;
-    run.disabled = activeIdentity !== "root";
     run.addEventListener("click", async () => {
       try {
         await submit();
       } catch (error) {
-        window.alert(error.message);
+        await notifyDashboard("Operation failed", error.message, "danger");
       }
     });
     const abort = element("button", "danger", "Abort");
     abort.type = "button";
     abort.dataset.qfwAction = "abort";
     abort.dataset.qfwWidget = widget;
-    const operation = operationForGroup(group);
-    abort.disabled = activeIdentity !== "root"
-      || !operation || !["queued", "running", "aborting"].includes(operation.status);
     abort.addEventListener("click", async () => {
-      if (!window.confirm(`Abort ${operation?.action || "operation"}?`)) return;
+      const operation = operationForGroup(group);
+      if (!await confirmDashboardAction(
+        "Abort operation",
+        `Abort ${operation?.action || "operation"}? The active process will be terminated.`,
+        { severity: "danger", confirmLabel: "Abort operation" },
+      )) return;
       try {
         await abortOperation(group);
       } catch (error) {
-        window.alert(error.message);
+        await notifyDashboard("Abort failed", error.message, "danger");
       }
     });
-    buttons.append(run, abort);
+    const status = element("output", "qfw-operation-status");
+    status.dataset.qfwOperationStatus = group;
+    status.setAttribute("aria-live", "polite");
+    buttons.append(run, status, abort);
+    applyOperationControlState(buttons, group);
     return buttons;
+  }
+
+  function operationControlState(group) {
+    const operation = operationForGroup(group);
+    const pending = pendingOperationGroups.has(group);
+    const abortPending = pendingAbortGroups.has(group);
+    const status = abortPending ? "aborting"
+      : pending ? "running" : operation?.status || "idle";
+    const busy = pending || ["queued", "running", "aborting"].includes(status);
+    const labels = {
+      idle: "Idle",
+      queued: "Queued",
+      running: "Running",
+      aborting: "Aborting",
+      aborted: "Aborted",
+      succeeded: "Succeeded",
+      failed: "Failed",
+    };
+    return { abortPending, busy, label: labels[status] || status, operation, status };
+  }
+
+  function applyOperationControlState(container, group) {
+    const control = operationControlState(group);
+    const run = container.querySelector("[data-qfw-action=run]");
+    const abort = container.querySelector("[data-qfw-action=abort]");
+    const status = container.querySelector("[data-qfw-operation-status]");
+    if (run) {
+      run.disabled = activeIdentity !== "root" || control.busy;
+      run.classList.toggle("is-pressed", control.busy);
+      run.setAttribute("aria-pressed", String(control.busy));
+    }
+    if (abort) {
+      abort.disabled = activeIdentity !== "root" || !control.busy
+        || control.abortPending;
+    }
+    if (status) {
+      status.className = `qfw-operation-status qfw-operation-${control.status}`;
+      status.replaceChildren(element("span", "", control.label));
+      if (control.busy) {
+        const dots = element("span", "qfw-operation-busy-dots");
+        dots.setAttribute("aria-hidden", "true");
+        [0, 1, 2].forEach(() => dots.append(element("span", "", "·")));
+        status.append(dots);
+      }
+    }
   }
 
   function renderClusterControl() {
     const widget = "cluster-control";
     const cluster = element("div", "qfw-operation-control qfw-operation-cluster");
     const clusterAction = selectControl(widget, "operation", [
+      ["status", "Status"], ["synchronize", "Synchronize with upstream"],
       ["start", "Start"], ["stop", "Stop"], ["restart", "Restart"],
-      ["recreate", "Recreate"],
-    ], "start");
+      ["rebuild", "Rebuild"],
+    ], "status");
+    const rebuildMode = selectControl(widget, "rebuild_mode", [
+      ["incremental", "Incremental (use cache)"],
+      ["clean", "Clean (no cache)"],
+    ], "incremental");
     cluster.append(
       operationField("Operation", clusterAction),
+      operationField("Rebuild mode", rebuildMode),
       operationButtons(widget, "cluster", async () => {
         const operation = clusterAction.value;
-        const consequence = operation === "recreate"
-          ? " This removes and recreates containers and named volumes." : "";
-        if (!window.confirm(`${operation} cluster as root?${consequence}`)) return;
-        await runOperation("cluster", { action: `cluster-${operation}`, target: "cluster" });
+        const action = operation === "rebuild"
+          ? `cluster-rebuild-${rebuildMode.value}` : `cluster-${operation}`;
+        if (operation !== "status") {
+          const clean = operation === "rebuild" && rebuildMode.value === "clean";
+          const consequence = operation === "rebuild"
+            ? ` This performs a ${clean ? "no-cache" : "cached"} image build, then restarts and provisions the cluster without deleting named volumes.`
+            : "";
+          const dangerous = ["stop", "restart", "rebuild"].includes(operation);
+          if (!await confirmDashboardAction(
+            `${operation[0].toUpperCase()}${operation.slice(1)} cluster`,
+            `${operation} cluster as root?${consequence}`,
+            {
+              severity: dangerous ? "danger" : "warning",
+              confirmLabel: `${operation[0].toUpperCase()}${operation.slice(1)} cluster`,
+            },
+          )) return;
+        }
+        await runOperation("cluster", { action, target: "cluster" });
       }),
       operationOutput("cluster"),
     );
@@ -913,18 +1658,26 @@
       ["nwqsim", "NWQSim"], ["iqm", "IQM"], ["gateway", "Gateway"],
     ], "all");
     const serviceAction = selectControl(widget, "operation", [
-      ["start", "Start"], ["stop", "Stop"], ["restart", "Restart"],
+      ["status", "Status"], ["start", "Start"], ["stop", "Stop"],
+      ["restart", "Restart"],
       ["recover", "Recover"],
-    ], "start");
+    ], "status");
     services.append(
       operationField("Target", serviceTarget),
       operationField("Operation", serviceAction),
       operationButtons(widget, "services", async () => {
-        if (!window.confirm(
-          `${serviceAction.value} ${serviceTarget.value} as root?`,
+        const action = serviceAction.value;
+        const dangerous = ["stop", "restart"].includes(action);
+        if (action !== "status" && !await confirmDashboardAction(
+          `${action[0].toUpperCase()}${action.slice(1)} service`,
+          `${action} ${serviceTarget.value} as root?`,
+          {
+            severity: dangerous ? "danger" : "warning",
+            confirmLabel: `${action[0].toUpperCase()}${action.slice(1)} service`,
+          },
         )) return;
         await runOperation("services", {
-          action: `service-${serviceAction.value}`,
+          action: `service-${action}`,
           target: serviceTarget.value,
         });
       }),
@@ -933,10 +1686,22 @@
     return services;
   }
 
+  function slurmNodeNames() {
+    return [...new Set(
+      selectedSource("slurm").records
+        .filter((record) => record.kind === "node" && record.node)
+        .map((record) => String(record.node)),
+    )].sort((left, right) => left.localeCompare(right));
+  }
+
   function renderNodeControl() {
     const widget = "node-control";
     const nodes = element("div", "qfw-operation-control qfw-operation-nodes");
-    const node = textControl(widget, "node", "", "node name");
+    const nodeNames = slurmNodeNames();
+    const nodeChoices = nodeNames.length
+      ? nodeNames.map((name) => [name, name])
+      : [["", "No nodes available"]];
+    const node = selectControl(widget, "node", nodeChoices, nodeNames[0] || "");
     const nodeAction = selectControl(widget, "operation", [
       ["drain", "Drain"], ["resume", "Resume"],
     ], "drain");
@@ -946,9 +1711,17 @@
       operationField("Operation", nodeAction),
       operationField("Reason", reason),
       operationButtons(widget, "nodes", async () => {
-        if (!window.confirm(`${nodeAction.value} ${node.value} as root?`)) return;
+        const action = nodeAction.value;
+        if (!await confirmDashboardAction(
+          `${action[0].toUpperCase()}${action.slice(1)} node`,
+          `${action} ${node.value} as root?`,
+          {
+            severity: action === "drain" ? "danger" : "warning",
+            confirmLabel: `${action[0].toUpperCase()}${action.slice(1)} node`,
+          },
+        )) return;
         await runOperation("nodes", {
-          action: `node-${nodeAction.value}`,
+          action: `node-${action}`,
           target: node.value,
           reason: reason.value,
         });
@@ -958,9 +1731,37 @@
     return nodes;
   }
 
+  function refreshNodeControlChoices(widget) {
+    const control = widget.querySelector('[data-qfw-control="node"]');
+    if (!control || control === document.activeElement) return;
+    const names = slurmNodeNames();
+    const available = names.length ? names : [""];
+    const existing = [...control.options].map((option) => option.value);
+    if (existing.length === available.length
+        && existing.every((name, index) => name === available[index])) return;
+    const selected = control.value;
+    control.replaceChildren();
+    if (names.length) {
+      names.forEach((name) => {
+        const option = element("option", "", name);
+        option.value = name;
+        control.append(option);
+      });
+    } else {
+      const option = element("option", "", "No nodes available");
+      option.value = "";
+      control.append(option);
+    }
+    control.value = names.includes(selected) ? selected : names[0] || "";
+  }
+
   async function openClusterShell(target, confirmRoot = true) {
     if (confirmRoot && activeIdentity === "root"
-        && !window.confirm(`Open a root shell in ${target}?`)) return;
+        && !await confirmDashboardAction(
+          "Open root shell",
+          `Open a privileged root shell in ${target}?`,
+          { severity: "warning", confirmLabel: "Open shell" },
+        )) return;
     await request("/api/qfw-dashboard/shell", {
       method: "POST",
       body: JSON.stringify({ identity: activeIdentity, target }),
@@ -996,66 +1797,415 @@
       try {
         await openClusterShell(shellTarget.value);
       } catch (error) {
-        window.alert(error.message);
+        await notifyDashboard("Shell failed", error.message, "danger");
       }
     });
     access.append(operationField("Node", shellTarget), shell);
     return access;
   }
 
+  function packagedExamples() {
+    return state.examples?.length
+      ? state.examples
+      : [{
+        name: "qiskit-simple",
+        backends: ["nwqsim", "iqm"],
+        parameters: [{
+          name: "qubits", label: "Qubits", type: "integer",
+          default: 4, minimum: 1, maximum: 10000,
+          help: "Number of qubits used by the circuit.",
+        }],
+      }];
+  }
+
+  function refreshPackagedExamples(root) {
+    const control = root.querySelector("[data-qfw-application-example]");
+    if (!control || control === document.activeElement) return;
+    const records = packagedExamples();
+    const desired = records.map((record) => ({
+      name: String(record.name),
+      backends: (record.backends || []).map(String).join(","),
+    }));
+    const existing = [...control.options].map((option) => ({
+      name: option.value,
+      backends: option.dataset.backends || "",
+    }));
+    if (JSON.stringify(existing) === JSON.stringify(desired)) return;
+    const selected = control.value;
+    const backend = root.querySelector("[data-qfw-application-backend]")?.value || "";
+    control.replaceChildren();
+    desired.forEach((record) => {
+      const option = element("option", "", record.name);
+      option.value = record.name;
+      option.dataset.backends = record.backends;
+      option.disabled = !record.backends.split(",").includes(backend);
+      control.append(option);
+    });
+    const selectable = [...control.options].filter((option) => !option.disabled);
+    control.value = selectable.some((option) => option.value === selected)
+      ? selected : selectable[0]?.value || "";
+    if (control.value !== selected) control.dispatchEvent(new Event("change"));
+  }
+
+  function trackedExperimentSubmission() {
+    const tracked = widgetStates.experimentSubmission || {};
+    const experiment = (state.experiments || []).find((item) =>
+      item.experiment_id === tracked.experiment_id);
+    if (experiment) return experiment;
+    if (tracked.experiment_id && state.schema === "qfw-dashboard-v1") {
+      return {};
+    }
+    return tracked;
+  }
+
+  function refreshExperimentSubmissionStatus(root) {
+    const form = root?.querySelector(".qfw-experiment-form");
+    if (!form) return;
+    const submit = form.querySelector("[data-qfw-submit-application]");
+    const output = form.querySelector("[data-qfw-submission-status]");
+    const terminal = form.querySelector("[data-qfw-submission-output]");
+    if (!submit || !output || !terminal) return;
+    const submission = trackedExperimentSubmission();
+    const status = String(submission.status || "idle").toLowerCase();
+    const active = [
+      "requesting", "created", "submitting", "submitted", "pending",
+      "configuring", "running", "completing",
+    ].includes(status);
+    const failed = status === "failed";
+    form.classList.toggle("is-submitting", active);
+    form.classList.toggle("has-error", failed);
+    submit.classList.toggle("is-depressed", active);
+    submit.disabled = active;
+    submit.setAttribute("aria-pressed", active ? "true" : "false");
+    submit.setAttribute("aria-busy", active ? "true" : "false");
+    if (!status || status === "idle") {
+      output.textContent = "Ready to submit";
+      output.dataset.state = "idle";
+      return;
+    }
+    const job = submission.slurm_job_id ? ` · job ${submission.slurm_job_id}` : "";
+    if (failed) {
+      const detail = submission.result?.error || submission.error || "submission failed";
+      output.textContent = `Failed${job} · ${String(detail).trim()}`;
+    } else if (status === "succeeded") {
+      output.textContent = `Succeeded${job}`;
+    } else if (active) {
+      const label = status === "requesting" ? "Sending request to Slurm" : status;
+      output.textContent = `${label}${job} …`;
+    } else {
+      output.textContent = `${status}${job}`;
+    }
+    output.dataset.state = failed ? "failed" : active ? "running" : status;
+    const canonicalJobId = String(submission.slurm_job_id || "").split("+")[0];
+    const liveJobs = selectedSource("slurm").records.filter((item) =>
+      item.kind === "job"
+      && String(item.job_id || "").split("+")[0] === canonicalJobId);
+    const liveStatus = liveJobs.map((item) => {
+      const identity = item.job_id ? `job ${item.job_id}` : "Slurm";
+      const summary = `${identity} · ${item.state || status}`;
+      return item.reason ? `${summary}\n${item.reason}` : summary;
+    }).join("\n\n");
+    const applicationOutput = String(submission.result?.output_tail || "").trim();
+    const command = String(submission.manifest?.command || "").trim();
+    terminal.textContent = [
+      command ? `$ ${command}` : "",
+      liveStatus,
+      applicationOutput,
+    ].filter(Boolean).join("\n\n") || `${status}${job} …`;
+  }
+
   function renderExperimentForm(root) {
     const form = element("form", "qfw-experiment-form");
-    form.append(element("h3", "", "Submit experiment"));
+    form.classList.add("qfw-grid-wide");
+    form.append(element("h3", "", "Submit Application"));
+    const draft = widgetStates.experimentDraft || {};
+
+    function phase(number, title, description) {
+      const section = element("section", "qfw-experiment-phase");
+      section.dataset.phase = String(number);
+      section.classList.toggle(
+        "is-active", section.dataset.phase === selectedExperimentPhase,
+      );
+      const heading = element("header", "qfw-experiment-phase-header");
+      heading.append(
+        element("span", "qfw-experiment-phase-number", String(number).padStart(2, "0")),
+        element("h4", "", title),
+      );
+      section.append(heading, element("p", "qfw-experiment-phase-help", description));
+      const fields = element("div", "qfw-experiment-fields");
+      section.append(fields);
+      return { section, fields };
+    }
+
+    function field(label, control, help = "") {
+      const wrapper = element("label", "qfw-experiment-field");
+      wrapper.append(element("span", "", label), control);
+      if (help) wrapper.append(element("small", "", help));
+      return wrapper;
+    }
+
+    const phases = element("div", "qfw-experiment-phases");
+
+    const reservationPhase = phase(
+      1, "Reservation",
+      "Choose the quantum service and how Slurm should create the allocation.",
+    );
     const backend = element("select");
+    backend.dataset.qfwApplicationBackend = "";
     ["nwqsim", "iqm"].forEach((name) => {
       const option = element("option", "", name);
       option.value = name;
       backend.append(option);
     });
-    const example = element("select");
-    const discoveredExamples = state.examples?.length
-      ? state.examples : [{ name: "qiskit-simple", backends: ["nwqsim", "iqm"] }];
-    discoveredExamples.forEach((record) => {
-      const option = element("option", "", record.name);
-      option.value = record.name;
-      option.dataset.backends = (record.backends || []).join(",");
-      example.append(option);
-    });
-    example.value = "qiskit-simple";
+    backend.value = draft.backend || "nwqsim";
     const mode = element("select");
     ["normal", "heterogeneous"].forEach((name) => {
       const option = element("option", "", name);
       option.value = name;
       mode.append(option);
     });
+    mode.value = draft.allocation_mode || "normal";
+    const workload = element("select");
+    ["quantum", "hybrid"].forEach((name) => {
+      const option = element("option", "", name);
+      option.value = name;
+      workload.append(option);
+    });
+    workload.value = draft.workload_kind || "quantum";
+    const partition = element("select");
+    const partitions = [...new Set(
+      selectedSource("slurm").records
+        .filter((item) => item.kind === "node")
+        .map((item) => String(item.partition || "").replace(/\*$/, ""))
+        .filter((name) => name && name !== "qfw-services"),
+    )];
+    (partitions.length ? partitions : ["normal"]).forEach((name) => {
+      const option = element("option", "", name);
+      option.value = name;
+      partition.append(option);
+    });
+    const requestedPartition = draft.partition || "normal";
+    partition.value = [...partition.options]
+      .some((option) => option.value === requestedPartition)
+      ? requestedPartition : partition.options[0]?.value || "normal";
+    reservationPhase.fields.append(
+      field("Backend", backend),
+      field("Allocation", mode),
+      field("Workload", workload),
+      field("Classical partition", partition),
+    );
+
+    const applicationPhase = phase(
+      2, "Application",
+      "Run a packaged QFw example or an application from the shared workspace.",
+    );
+    const applicationSource = element("select");
+    [["example", "Packaged QFw example"], ["path", "Application path"]]
+      .forEach(([value, label]) => {
+        const option = element("option", "", label);
+        option.value = value;
+        applicationSource.append(option);
+      });
+    applicationSource.value = draft.application_source || "example";
+    const example = element("select");
+    example.dataset.qfwApplicationExample = "";
+    const discoveredExamples = packagedExamples();
+    discoveredExamples.forEach((record) => {
+      const option = element("option", "", record.name);
+      option.value = record.name;
+      option.dataset.backends = (record.backends || []).join(",");
+      example.append(option);
+    });
+    example.value = draft.example || "qiskit-simple";
+    const applicationPath = element("input");
+    applicationPath.placeholder = "/workspace/path/to/application";
+    applicationPath.value = draft.application_path || "";
+    const sourceField = field("Application source", applicationSource);
+    const exampleField = field("QFw example", example);
+    const pathField = field("Application path", applicationPath,
+      "Use an absolute path beneath /workspace.");
+    const applicationParameterFields = element(
+      "div", "qfw-application-parameters",
+    );
+    const applicationParameterControls = new Map();
+    applicationPhase.fields.append(
+      sourceField, exampleField, pathField, applicationParameterFields,
+    );
+
+    function selectedExampleRecord() {
+      return packagedExamples().find((record) => record.name === example.value);
+    }
+
+    function currentApplicationParameters() {
+      return Object.fromEntries(
+        [...applicationParameterControls].map(([name, control]) => [
+          name,
+          control.type === "number" ? Number(control.value) : control.value,
+        ]),
+      );
+    }
+
+    function renderApplicationParameters(values = {}) {
+      applicationParameterFields.replaceChildren();
+      applicationParameterControls.clear();
+      if (applicationSource.value !== "example") return;
+      const definitions = selectedExampleRecord()?.parameters || [];
+      if (!definitions.length) {
+        applicationParameterFields.append(element(
+          "p", "qfw-application-parameter-empty",
+          "This example has no configurable runtime parameters.",
+        ));
+        return;
+      }
+      definitions.forEach((definition) => {
+        const control = element("input");
+        control.type = definition.type === "integer" ? "number" : "text";
+        if (definition.minimum !== undefined) {
+          control.min = String(definition.minimum);
+        }
+        if (definition.maximum !== undefined) {
+          control.max = String(definition.maximum);
+        }
+        control.value = String(values[definition.name] ?? definition.default ?? "");
+        applicationParameterControls.set(definition.name, control);
+        applicationParameterFields.append(field(
+          definition.label || definition.name, control, definition.help || "",
+        ));
+      });
+    }
+
+    const quantumPhase = phase(
+      3, "Quantum requirements",
+      "Declare upper bounds used by QPM admission control.",
+    );
     const shots = element("input");
     shots.type = "number";
     shots.min = "1";
-    shots.value = "16";
+    shots.value = String(draft.shots ?? 16);
+    const requirements = {};
+    [
+      ["circ_count", "Circuit count", 1, 1],
+      ["max_qubits", "Maximum qubits", 5, 1],
+      ["max_depth", "Maximum depth", 100, 1],
+      ["max_one_q_gates", "Maximum 1Q gates", 0, 0],
+      ["max_two_q_gates", "Maximum 2Q gates", 0, 0],
+      ["max_measurements", "Maximum measurements", 0, 0],
+    ].forEach(([name, label, initial, minimum]) => {
+      const input = element("input");
+      input.type = "number";
+      input.min = String(minimum);
+      input.value = String(draft[name] ?? initial);
+      requirements[name] = input;
+      quantumPhase.fields.append(field(label, input));
+    });
+    quantumPhase.fields.append(field("Maximum shots", shots));
+
+    const classicalPhase = phase(
+      4, "Classical requirements",
+      "Reserve nodes now and add only the optional resources the application needs.",
+    );
+    const nodes = element("input");
+    nodes.type = "number";
+    nodes.min = "1";
+    nodes.max = "8";
+    nodes.value = String(draft.nodes ?? 1);
+    classicalPhase.fields.append(field("Nodes", nodes, "Required."));
+    const addRequirement = element("select");
+    const optionalRequirements = {
+      tasks: { label: "MPI ranks", kind: "number", initial: 1, min: 1 },
+      tasks_per_node: { label: "Ranks per node", kind: "number", initial: 1, min: 1 },
+      cpus_per_task: { label: "CPUs per rank", kind: "number", initial: 1, min: 1 },
+      memory: { label: "Memory", kind: "memory", initial: "4G" },
+      gpus: { label: "GPUs", kind: "gpus", initial: 1, min: 1 },
+      constraint: { label: "Node features", kind: "text", initial: "" },
+      exclusive: { label: "Exclusive allocation", kind: "boolean", initial: true },
+    };
+    const activeClassical = new Map();
+    const optionalFields = element("div", "qfw-optional-requirements");
+    const addField = field("Add requirement", addRequirement,
+      "Optional Slurm resources appear only when selected.");
+    addField.classList.add("qfw-add-requirement");
+    classicalPhase.fields.append(addField, optionalFields);
+
+    function renderRequirementMenu() {
+      addRequirement.replaceChildren(element("option", "", "Select a requirement…"));
+      addRequirement.firstElementChild.value = "";
+      Object.entries(optionalRequirements).forEach(([name, definition]) => {
+        if (activeClassical.has(name)) return;
+        const option = element("option", "", definition.label);
+        option.value = name;
+        addRequirement.append(option);
+      });
+      addRequirement.value = "";
+    }
+
+    function addClassicalRequirement(name, payload = {}) {
+      const definition = optionalRequirements[name];
+      if (!definition || activeClassical.has(name)) return;
+      const row = element("div", "qfw-optional-requirement");
+      const controls = { row };
+      if (definition.kind === "boolean") {
+        const input = element("input");
+        input.type = "checkbox";
+        input.checked = payload[name] ?? definition.initial;
+        controls.input = input;
+        row.append(field(definition.label, input));
+      } else {
+        const input = element("input");
+        input.type = definition.kind === "number" || definition.kind === "gpus"
+          ? "number" : "text";
+        if (definition.min !== undefined) input.min = String(definition.min);
+        input.value = String(payload[name] ?? definition.initial);
+        controls.input = input;
+        const requirementField = field(definition.label, input);
+        if (definition.kind === "memory" || definition.kind === "gpus") {
+          const scope = element("select");
+          const scopes = definition.kind === "memory"
+            ? [["node", "Per node"], ["cpu", "Per CPU"]]
+            : [["node", "Per node"], ["task", "Per rank"]];
+          scopes.forEach(([value, label]) => {
+            const option = element("option", "", label);
+            option.value = value;
+            scope.append(option);
+          });
+          scope.value = payload[`${name}_scope`] || "node";
+          controls.scope = scope;
+          requirementField.append(scope);
+        }
+        row.append(requirementField);
+      }
+      const remove = element("button", "qfw-remove-requirement", "Remove");
+      remove.type = "button";
+      remove.addEventListener("click", () => {
+        activeClassical.delete(name);
+        row.remove();
+        renderRequirementMenu();
+        saveDraft();
+        updatePhaseStatus();
+      });
+      row.append(remove);
+      activeClassical.set(name, controls);
+      optionalFields.append(row);
+      renderRequirementMenu();
+    }
+
+    addRequirement.addEventListener("change", () => {
+      if (addRequirement.value) addClassicalRequirement(addRequirement.value);
+      saveDraft();
+      updatePhaseStatus();
+    });
+
+    const runtimePhase = phase(
+      5, "Runtime",
+      "Bound how long Slurm may keep the allocation.",
+    );
     const timeMinutes = element("input");
     timeMinutes.type = "number";
     timeMinutes.min = "1";
     timeMinutes.max = "240";
-    timeMinutes.value = "45";
-    const chemistryApp = element("input");
-    chemistryApp.placeholder = "/workspace/.../chemistry.py";
-    const classical = {};
-    [
-      ["partition", "Partition", "normal", "text"],
-      ["nodes", "Application nodes", 1, "number"],
-      ["tasks", "Application tasks", 1, "number"],
-      ["launcher_nodes", "Launcher nodes", 1, "number"],
-      ["launcher_tasks", "Launcher tasks", 1, "number"],
-      ["account", "Account", "", "text"],
-      ["qos", "QoS", "", "text"],
-    ].forEach(([name, label, initial, type]) => {
-      const input = element("input");
-      input.type = type;
-      if (type === "number") input.min = "1";
-      input.value = String(initial);
-      classical[name] = input;
-      form.append(element("label", "", `${label} `), input);
-    });
+    timeMinutes.value = String(draft.time_minutes ?? 45);
+    runtimePhase.fields.append(field("Wall time (minutes)", timeMinutes));
+
     function updateBackendConstraints() {
       timeMinutes.max = backend.value === "iqm" ? "15" : "240";
       if (backend.value === "iqm" && Number(timeMinutes.value) > 15) {
@@ -1069,185 +2219,259 @@
         example.value = [...example.options]
           .find((option) => !option.disabled)?.value || "";
       }
+      updateApplicationFields();
     }
+
+    function updateApplicationFields() {
+      const custom = applicationSource.value === "path";
+      exampleField.hidden = custom;
+      pathField.hidden = !custom && example.value !== "chemistry";
+      pathField.firstElementChild.textContent = custom
+        ? "Application path" : "Chemistry application path";
+    }
+
     backend.addEventListener("change", updateBackendConstraints);
-    updateBackendConstraints();
-    const requirements = {};
-    [
-      ["circ_count", "Circuits", 1],
-      ["max_qubits", "Max qubits", 5],
-      ["max_depth", "Max depth", 100],
-      ["max_one_q_gates", "Max 1Q gates", 0],
-      ["max_two_q_gates", "Max 2Q gates", 0],
-      ["max_measurements", "Max measurements", 0],
-    ].forEach(([name, label, initial]) => {
-      const input = element("input");
-      input.type = "number";
-      input.min = name.startsWith("max_") && name !== "max_qubits"
-        && name !== "max_depth" ? "0" : "1";
-      input.value = String(initial);
-      requirements[name] = input;
-      form.append(element("label", "", `${label} `), input);
+    applicationSource.addEventListener("change", () => {
+      updateApplicationFields();
+      renderApplicationParameters();
     });
-    const workload = element("select");
-    ["quantum", "hybrid"].forEach((name) => {
-      const option = element("option", "", name);
-      option.value = name;
-      workload.append(option);
+    example.addEventListener("change", () => {
+      updateApplicationFields();
+      renderApplicationParameters();
     });
-    const submit = element("button", "", "Submit through Slurm");
+
+    const previewPhase = phase(
+      6, "Preview and submit",
+      "Review the generated allocation before it reaches Slurm.",
+    );
+    const submit = element("button", "", "Submit Application through Slurm");
     submit.type = "submit";
-    const preview = element("button", "", "Preview allocation");
+    submit.dataset.qfwSubmitApplication = "";
+    const preview = element("button", "", "Preview batch file");
     preview.type = "button";
-    const previewOutput = element("code", "qfw-command-preview");
-    const preset = element("select");
-    const presetKey = `${storageKey()}.experiment-presets`;
-    function readPresets() {
-      try {
-        return JSON.parse(window.localStorage.getItem(presetKey) || "{}");
-      } catch (error) {
-        return {};
-      }
-    }
-    function renderPresets() {
-      preset.replaceChildren(element("option", "", "saved presets"));
-      Object.keys(readPresets()).sort().forEach((name) => {
-        const option = element("option", "", name);
-        option.value = name;
-        preset.append(option);
-      });
-    }
+    const previewOutput = preserveScroll(
+      element(
+        "pre", "qfw-command-preview qfw-resizable-text", "Batch preview not generated.",
+      ),
+    );
+    previewOutput.dataset.qfwSubmissionOutput = "";
+    let experimentId = draft.experiment_id || window.crypto.randomUUID();
     function formPayload() {
-      return {
+      const payload = {
+        experiment_id: experimentId,
         identity: activeIdentity,
         backend: backend.value,
-        example: example.value,
+        application_source: applicationSource.value,
+        example: applicationSource.value === "example" ? example.value : "custom",
+        application_path: applicationPath.value.trim(),
+        application_parameters: currentApplicationParameters(),
         allocation_mode: mode.value,
         shots: Number(shots.value),
         time_minutes: Number(timeMinutes.value),
-        chemistry_app: chemistryApp.value,
         workload_kind: workload.value,
-        ...Object.fromEntries(
-          Object.entries(classical).map(([name, input]) => [
-            name, input.type === "number" ? Number(input.value) : input.value,
-          ]),
-        ),
+        partition: partition.value.trim(),
+        nodes: Number(nodes.value),
         ...Object.fromEntries(
           Object.entries(requirements).map(([name, input]) => [
             name, Number(input.value),
           ]),
         ),
       };
+      activeClassical.forEach((controls, name) => {
+        if (controls.input.type === "checkbox") {
+          payload[name] = controls.input.checked;
+        } else if (controls.input.type === "number") {
+          payload[name] = Number(controls.input.value);
+        } else {
+          payload[name] = controls.input.value.trim();
+        }
+        if (controls.scope) payload[`${name}_scope`] = controls.scope.value;
+      });
+      return payload;
     }
-    function applyPreset(payload) {
+
+    function saveDraft() {
+      widgetStates.experimentDraft = formPayload();
+      savePresentation();
+    }
+
+    function updatePhaseStatus() {
+      const sourceValid = applicationSource.value === "example"
+        ? Boolean(example.value) && (example.value !== "chemistry"
+          || applicationPath.value.startsWith("/workspace/"))
+        : applicationPath.value.startsWith("/workspace/");
+      const quantumValid = Number(shots.value) > 0
+        && Object.values(requirements).every((input) => input.checkValidity());
+      [
+        [reservationPhase.section, Boolean(backend.value && mode.value && partition.value)],
+        [applicationPhase.section, sourceValid],
+        [quantumPhase.section, quantumValid],
+        [classicalPhase.section, nodes.checkValidity()],
+        [runtimePhase.section, timeMinutes.checkValidity()],
+      ].forEach(([section, valid]) => section.classList.toggle("is-complete", valid));
+    }
+
+    function applyDraft(payload) {
       backend.value = payload.backend || "nwqsim";
       example.value = payload.example || "qiskit-simple";
+      applicationSource.value = payload.application_source || "example";
+      applicationPath.value = payload.application_path || "";
       mode.value = payload.allocation_mode || "normal";
       workload.value = payload.workload_kind || "quantum";
       shots.value = String(payload.shots || 16);
       timeMinutes.value = String(payload.time_minutes || 45);
-      chemistryApp.value = payload.chemistry_app || "";
-      Object.entries(classical).forEach(([name, input]) => {
-        if (payload[name] !== undefined) input.value = String(payload[name]);
-      });
+      partition.value = payload.partition || "normal";
+      nodes.value = String(payload.nodes || 1);
       Object.entries(requirements).forEach(([name, input]) => {
         if (payload[name] !== undefined) input.value = String(payload[name]);
       });
+      activeClassical.forEach((controls) => controls.row.remove());
+      activeClassical.clear();
+      Object.keys(optionalRequirements).forEach((name) => {
+        if (payload[name] !== undefined) addClassicalRequirement(name, payload);
+      });
+      renderRequirementMenu();
       updateBackendConstraints();
+      updateApplicationFields();
+      renderApplicationParameters(payload.application_parameters || {});
+      updatePhaseStatus();
+      saveDraft();
     }
-    renderPresets();
-    preset.addEventListener("change", () => {
-      const payload = readPresets()[preset.value];
-      if (payload) applyPreset(payload);
-    });
-    const savePreset = element("button", "", "Save preset");
-    savePreset.type = "button";
-    savePreset.addEventListener("click", () => {
-      const name = window.prompt("Preset name");
-      if (!name || !/^[A-Za-z0-9_.-]+$/.test(name)) return;
-      const presets = readPresets();
-      const payload = formPayload();
-      delete payload.identity;
-      presets[name] = payload;
-      window.localStorage.setItem(presetKey, JSON.stringify(presets));
-      renderPresets();
-      preset.value = name;
-    });
-    form.append(
-      element("label", "", "Backend "), backend,
-      element("label", "", "Example "), example,
-      element("label", "", "Allocation "), mode,
-      element("label", "", "Workload "), workload,
-      element("label", "", "Shots "), shots,
-      element("label", "", "Time limit (minutes) "), timeMinutes,
-      element("label", "", "Chemistry application "), chemistryApp,
-      element("label", "", "Preset "), preset, savePreset,
-      preview, submit, previewOutput,
+    applyDraft(draft);
+    const previewActions = element("div", "qfw-experiment-actions");
+    const submissionStatus = element(
+      "span", "qfw-experiment-submission-status", "Ready to submit",
     );
+    submissionStatus.dataset.qfwSubmissionStatus = "";
+    submissionStatus.dataset.state = "idle";
+    previewActions.append(preview, submissionStatus, submit);
+    previewPhase.fields.append(previewActions, previewOutput);
+    phases.append(
+      reservationPhase.section,
+      applicationPhase.section,
+      quantumPhase.section,
+      classicalPhase.section,
+      runtimePhase.section,
+      previewPhase.section,
+    );
+    form.append(phases);
+    form.addEventListener("input", () => {
+      saveDraft();
+      updatePhaseStatus();
+    });
+    form.addEventListener("change", () => {
+      saveDraft();
+      updatePhaseStatus();
+    });
+    updateApplicationFields();
+    renderApplicationParameters(draft.application_parameters || {});
+    updatePhaseStatus();
+    refreshExperimentSubmissionStatus(form);
     preview.addEventListener("click", async () => {
       try {
         const payload = await request("/api/qfw-dashboard/preview", {
           method: "POST", body: JSON.stringify(formPayload()),
         });
+        experimentId = payload.experiment_id;
+        saveDraft();
         previewOutput.textContent = payload.command;
       } catch (error) {
-        window.alert(error.message);
+        await notifyDashboard("Preview failed", error.message, "danger");
       }
     });
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
       const hardware = backend.value === "iqm";
-      if (hardware && !window.confirm("Submit bounded work to real IQM hardware?")) return;
+      if (hardware && !await confirmDashboardAction(
+        "Submit real-hardware application",
+        "This submits bounded work to the real IQM hardware.",
+        { severity: "warning", confirmLabel: "Submit application" },
+      )) return;
+      widgetStates.experimentSubmission = {
+        status: "requesting", experiment_id: "", slurm_job_id: "",
+      };
+      savePresentation();
+      refreshExperimentSubmissionStatus(form);
       try {
-        await request("/api/qfw-dashboard/experiments", {
+        const experiment = await request("/api/qfw-dashboard/experiments", {
           method: "POST",
           body: JSON.stringify({
             ...formPayload(), submit_real_hardware: hardware,
           }),
         });
+        widgetStates.experimentSubmission = {
+          status: experiment.status,
+          experiment_id: experiment.experiment_id,
+          slurm_job_id: experiment.slurm_job_id || "",
+        };
+        experimentId = window.crypto.randomUUID();
+        saveDraft();
+        savePresentation();
         await refreshState();
       } catch (error) {
-        window.alert(error.message);
+        widgetStates.experimentSubmission = {
+          status: "failed", experiment_id: "", slurm_job_id: "",
+          error: error.message,
+        };
+        savePresentation();
+        refreshExperimentSubmissionStatus(form);
       }
     });
     root.append(form);
   }
 
-  function captureWidgetScrollPositions() {
+  function captureWidgetScrollPositions(root) {
     const positions = {};
-    if (!dashboardRoot) return positions;
-    dashboardRoot.querySelectorAll(".qfw-widget[data-widget]").forEach((widget) => {
-      positions[widget.dataset.widget] = [
-        ...widget.querySelectorAll(
-          ".qfw-topology, .qfw-table-wrap, .qfw-alert-detail",
-        ),
-      ].map((container) => ({
+    if (!root) return positions;
+    root.querySelectorAll("[data-qfw-preserve-scroll]").forEach((container) => {
+      const scope = container.closest(".qfw-widget[data-widget], .qfw-experiment-form")
+        || root;
+      const scopeName = scope.dataset.widget || (scope === root ? "root" : "experiment-form");
+      const siblings = [...scope.querySelectorAll("[data-qfw-preserve-scroll]")];
+      const key = `${scopeName}:${siblings.indexOf(container)}`;
+      positions[key] = {
+        height: container.style.height,
         left: container.scrollLeft,
         top: container.scrollTop,
-      }));
+      };
     });
     return positions;
   }
 
-  function restoreWidgetScrollPositions(positions) {
-    Object.entries(positions).forEach(([id, offsets]) => {
-      const widget = dashboardRoot?.querySelector(`[data-widget="${id}"]`);
-      if (!widget) return;
-      const containers = widget.querySelectorAll(
-        ".qfw-topology, .qfw-table-wrap, .qfw-alert-detail",
-      );
-      offsets.forEach((offset, index) => {
-        if (!containers[index]) return;
-        containers[index].scrollLeft = offset.left;
-        containers[index].scrollTop = offset.top;
-      });
+  function restoreWidgetScrollPositions(root, positions) {
+    if (!root) return;
+    root.querySelectorAll("[data-qfw-preserve-scroll]").forEach((container) => {
+      const scope = container.closest(".qfw-widget[data-widget], .qfw-experiment-form")
+        || root;
+      const scopeName = scope.dataset.widget || (scope === root ? "root" : "experiment-form");
+      const siblings = [...scope.querySelectorAll("[data-qfw-preserve-scroll]")];
+      const offset = positions[`${scopeName}:${siblings.indexOf(container)}`];
+      if (!offset) return;
+      if (offset.height) container.style.height = offset.height;
+      container.scrollLeft = offset.left;
+      container.scrollTop = offset.top;
     });
   }
 
-  function renderDashboard() {
-    if (!dashboardRoot) return;
-    const scrollPositions = captureWidgetScrollPositions();
-    dashboardRoot.replaceChildren();
+  function resetDashboardGeometry(root) {
+    root.querySelectorAll("[data-qfw-preserve-scroll]").forEach((container) => {
+      container.style.removeProperty("height");
+      container.scrollLeft = 0;
+      container.scrollTop = 0;
+    });
+    const topologyZoom = root.querySelector(".qfw-topology-zoom");
+    const topologyGraph = root.querySelector(".qfw-topology-graph");
+    if (topologyZoom) topologyZoom.value = "100";
+    if (topologyGraph) topologyGraph.style.width = "100%";
+    widgetStates.topology = { ...widgetStates.topology, zoom: 100 };
+    savePresentation();
+    publishWidgets();
+  }
+
+  function renderDashboardRoot(root) {
+    if (!root) return;
+    const scrollPositions = captureWidgetScrollPositions(root);
+    root.replaceChildren();
     const header = element("header", "qfw-dashboard-header");
     const title = element("div", "qfw-dashboard-title");
     title.append(
@@ -1275,27 +2499,95 @@
     const zoomLabel = element("output", "qfw-zoom-label", "100%");
     const zoomIn = element("button", "", "+");
     const reset = element("button", "", "Reset view");
-    [zoomOut, zoomIn, reset].forEach((button) => { button.type = "button"; });
+    const clear = element("button", "qfw-dashboard-clear danger", "Clear state");
+    const clearStatus = element("output", "qfw-dashboard-clear-status");
+    clearStatus.setAttribute("aria-live", "polite");
+    clearStatus.textContent = {
+      idle: "", running: "Clearing…", succeeded: "Cleared", failed: "Failed",
+    }[dashboardResetStatus] || dashboardResetStatus;
+    clear.disabled = activeIdentity !== "root" || dashboardResetStatus === "running";
+    clear.classList.toggle("is-pressed", dashboardResetStatus === "running");
+    clear.setAttribute("aria-pressed", String(dashboardResetStatus === "running"));
+    [zoomOut, zoomIn, reset, clear].forEach((button) => { button.type = "button"; });
     viewControls.append(
       element("span", "qfw-canvas-hint", "Wheel zoom · middle-drag pan"),
-      zoomOut, zoomLabel, zoomIn, reset,
+      zoomOut, zoomLabel, zoomIn, reset, clear, clearStatus,
     );
     header.append(viewControls, identityLabel);
-    dashboardRoot.append(header);
+    root.append(header);
     const viewport = element("div", "qfw-canvas-viewport");
     viewport.setAttribute("aria-label", "Zoomable dashboard canvas");
     const stage = element("main", "qfw-canvas-stage");
-    const grid = element("div", "qfw-widget-grid");
-    WIDGETS.forEach(([id, label]) => grid.append(buildWidget(id, label)));
-    stage.append(grid);
-    renderExperimentForm(stage);
+    const sections = element("div", "qfw-widget-sections");
+    WIDGET_GROUPS.forEach((group) => sections.append(buildWidgetGroup(group)));
+    stage.append(sections);
     viewport.append(stage);
-    dashboardRoot.append(viewport);
+    root.append(viewport);
     const camera = installCanvasInteraction(viewport, stage, zoomLabel);
     zoomOut.addEventListener("click", () => camera.zoom(0.85));
     zoomIn.addEventListener("click", () => camera.zoom(1 / 0.85));
-    reset.addEventListener("click", () => camera.reset());
-    restoreWidgetScrollPositions(scrollPositions);
+    reset.addEventListener("click", () => {
+      camera.reset();
+      resetDashboardGeometry(root);
+    });
+    clear.addEventListener("click", () => { void clearDashboardState(); });
+    restoreWidgetScrollPositions(root, scrollPositions);
+  }
+
+  function refreshOperationWidget(widget, group) {
+    if (group === "nodes") refreshNodeControlChoices(widget);
+    const output = widget.querySelector(".qfw-operation-output");
+    if (output) output.replaceWith(operationOutput(group));
+    const operation = operationForGroup(group);
+    widget.classList.toggle("has-error", operation?.status === "failed");
+    const buttons = widget.querySelector(".qfw-operation-buttons");
+    if (buttons) applyOperationControlState(buttons, group);
+  }
+
+  function refreshDashboardDataRoot(root) {
+    if (!root?.isConnected) return;
+    const scrollPositions = captureWidgetScrollPositions(root);
+    refreshPackagedExamples(root);
+    refreshExperimentSubmissionStatus(root);
+    WIDGETS.forEach(([id]) => {
+      const widget = root.querySelector(`.qfw-widget[data-widget="${id}"]`);
+      if (!widget) return;
+      if (OPERATION_WIDGET_GROUPS[id]) {
+        refreshOperationWidget(widget, OPERATION_WIDGET_GROUPS[id]);
+        return;
+      }
+      if (id === "cluster-access" || widget.contains(document.activeElement)) return;
+      const body = widget.children[1];
+      if (body) body.replaceWith(renderWidgetBody(id, widgetPayload(id)));
+    });
+    restoreWidgetScrollPositions(root, scrollPositions);
+  }
+
+  function refreshDashboardData() {
+    if (dashboardRoot?.isConnected) refreshDashboardDataRoot(dashboardRoot);
+    [...dashboardMirrors].forEach((mirror) => {
+      if (!mirror.isConnected) {
+        dashboardMirrors.delete(mirror);
+        return;
+      }
+      refreshDashboardDataRoot(mirror);
+    });
+  }
+
+  function renderDashboard() {
+    if (activeCanvasPans) {
+      dashboardRenderPending = true;
+      return;
+    }
+    dashboardRenderPending = false;
+    if (dashboardRoot?.isConnected) renderDashboardRoot(dashboardRoot);
+    [...dashboardMirrors].forEach((mirror) => {
+      if (!mirror.isConnected) {
+        dashboardMirrors.delete(mirror);
+        return;
+      }
+      renderDashboardRoot(mirror);
+    });
   }
 
   function publishWidgets() {
@@ -1311,6 +2603,9 @@
         cluster: "QFw-SLURM-Cluster",
         identity: activeIdentity,
         freshness: state.observed_at || "not observed",
+        operation_failed: OPERATION_WIDGET_GROUPS[id]
+          ? operationForGroup(OPERATION_WIDGET_GROUPS[id])?.status === "failed"
+          : false,
         payload,
         markup: rendered.outerHTML,
         presentation: widgetStates[id] || {},
@@ -1334,7 +2629,7 @@
         publishWidgets();
       } else if (message.type === "control-action" && message.widget) {
         runPopoutControlAction(message).catch((error) => {
-          window.alert(error.message);
+          void notifyDashboard("Operation failed", error.message, "danger");
         });
       }
     });
@@ -1362,12 +2657,20 @@
     }
     if (message.action !== "run") return;
     if (message.widget === "cluster-control") {
-      if (!["start", "stop", "restart", "recreate"].includes(values.operation)) return;
+      if (!["status", "synchronize", "start", "stop", "restart", "rebuild"].includes(
+        values.operation,
+      )) return;
+      if (!["incremental", "clean"].includes(values.rebuild_mode)) return;
+      const action = values.operation === "rebuild"
+        ? `cluster-rebuild-${values.rebuild_mode}`
+        : `cluster-${values.operation}`;
       await runOperation("cluster", {
-        action: `cluster-${values.operation}`, target: "cluster",
+        action, target: "cluster",
       });
     } else if (message.widget === "service-control") {
-      if (!["start", "stop", "restart", "recover"].includes(values.operation)) return;
+      if (!["status", "start", "stop", "restart", "recover"].includes(
+        values.operation,
+      )) return;
       if (!["all", "directory", "nwqsim", "iqm", "gateway"].includes(values.target)) return;
       await runOperation("services", {
         action: `service-${values.operation}`, target: values.target,
@@ -1392,18 +2695,7 @@
         sources: {}, operations: [], experiments: [], error: error.message,
       };
     }
-    [...(state.operations || []), ...(state.experiments || [])].forEach((item) => {
-      const id = item.operation_id || item.experiment_id;
-      if (!id || notifiedTerminal.has(id)
-          || !["aborted", "succeeded", "failed"].includes(item.status)) return;
-      notifiedTerminal.add(id);
-      if (window.Notification?.permission === "granted") {
-        new window.Notification(`QFw ${item.status}`, {
-          body: `${item.action || item.example || "operation"} as ${item.identity}`,
-        });
-      }
-    });
-    renderDashboard();
+    refreshDashboardData();
     publishWidgets();
   }
 
@@ -1522,11 +2814,13 @@
 
   async function refreshEvents() {
     if (progressPaused) return;
+    const resetGeneration = dashboardResetGeneration;
     try {
       const payload = await request(
         `/api/qfw-dashboard/events?cursor=${eventCursor}&limit=500`
           + `&identity=${encodeURIComponent(progressIdentity)}`,
       );
+      if (resetGeneration !== dashboardResetGeneration) return;
       if (payload.gap) {
         progressEvents.push({ severity: "warning", message: "log cursor gap" });
       }
@@ -1544,6 +2838,7 @@
             + `&identity=${encodeURIComponent(progressIdentity)}`
             + `&instance=${encodeURIComponent(instance)}`,
         );
+        if (resetGeneration !== dashboardResetGeneration) return;
         if (logs.gap) {
           progressEvents.push({
             kind: "gap", component: source, severity: "warning",
@@ -1569,6 +2864,47 @@
     if (runtimeApi) eventPolling = window.setTimeout(pollEvents, 1200);
   }
 
+  function trackDashboardSelection(event) {
+    const phase = event.target instanceof Element
+      ? event.target.closest(".qfw-dashboard .qfw-experiment-phase") : null;
+    const widget = !phase && event.target instanceof Element
+      ? event.target.closest(".qfw-dashboard .qfw-widget") : null;
+    selectedExperimentPhase = phase?.dataset.phase || null;
+    selectedDashboardWidget = widget?.dataset.widget || null;
+    document.querySelectorAll(".qfw-dashboard .qfw-experiment-phase")
+      .forEach((item) => {
+        item.classList.toggle(
+          "is-active", item.dataset.phase === selectedExperimentPhase,
+        );
+      });
+    document.querySelectorAll(".qfw-dashboard .qfw-widget")
+      .forEach((item) => {
+        item.classList.toggle(
+          "is-active", item.dataset.widget === selectedDashboardWidget,
+        );
+      });
+  }
+
+  function trackDashboardPointerSelection(event) {
+    if (event.button !== 0) {
+      nonPrimarySelectionPointers.add(event.pointerId);
+      return;
+    }
+    nonPrimarySelectionPointers.clear();
+    trackDashboardSelection(event);
+  }
+
+  function trackDashboardFocusSelection(event) {
+    if (!nonPrimarySelectionPointers.size) trackDashboardSelection(event);
+  }
+
+  function finishNonPrimarySelectionPointer(event) {
+    if (!nonPrimarySelectionPointers.has(event.pointerId)) return;
+    window.setTimeout(() => {
+      nonPrimarySelectionPointers.delete(event.pointerId);
+    }, 0);
+  }
+
   function activate(runtime) {
     runtimeApi = runtime;
     loadPresentation();
@@ -1578,9 +2914,28 @@
     originalStatusOutput.replaceWith(dashboardRoot);
     connectWidgetChannel();
     installProgressTools();
+    document.addEventListener("pointerdown", trackDashboardPointerSelection, true);
+    document.addEventListener("pointerup", finishNonPrimarySelectionPointer, true);
+    document.addEventListener("pointercancel", finishNonPrimarySelectionPointer, true);
+    document.addEventListener("focusin", trackDashboardFocusSelection, true);
     renderDashboard();
     pollState();
     pollEvents();
+  }
+
+  function mountWorkflowPane(kind, target) {
+    if (kind !== "status" || !dashboardRoot
+        || !target || typeof target.replaceChildren !== "function") {
+      return false;
+    }
+    const mirror = element("div", "qfw-dashboard");
+    dashboardMirrors.add(mirror);
+    target.replaceChildren(mirror);
+    renderDashboardRoot(mirror);
+    return () => {
+      dashboardMirrors.delete(mirror);
+      mirror.remove();
+    };
   }
 
   function deactivate() {
@@ -1588,9 +2943,23 @@
     window.clearTimeout(eventPolling);
     polling = null;
     eventPolling = null;
+    activeCanvasPans = 0;
+    dashboardRenderPending = false;
+    pendingOperationGroups.clear();
+    pendingAbortGroups.clear();
+    selectedDashboardWidget = null;
+    selectedExperimentPhase = null;
+    nonPrimarySelectionPointers.clear();
+    document.removeEventListener("pointerdown", trackDashboardPointerSelection, true);
+    document.removeEventListener("pointerup", finishNonPrimarySelectionPointer, true);
+    document.removeEventListener("pointercancel", finishNonPrimarySelectionPointer, true);
+    document.removeEventListener("focusin", trackDashboardFocusSelection, true);
+    [...activeDashboardDialogs].forEach((close) => close(false));
     widgetChannel?.close();
     widgetChannel = null;
     popupWindows.clear();
+    dashboardMirrors.forEach((mirror) => mirror.remove());
+    dashboardMirrors.clear();
     if (dashboardRoot?.isConnected && originalStatusOutput) {
       dashboardRoot.replaceWith(originalStatusOutput);
     }
@@ -1607,11 +2976,17 @@
     backendPackage: "qfw_slurm_dashboard",
     navigation: "custom",
     paneKinds: [
-      { kind: "status", label: "Dashboard" },
+      {
+        kind: "status",
+        label: "Dashboard",
+        singleton: true,
+        popoutMode: "mirror",
+      },
       { kind: "progress", label: "Progress" },
       { kind: "artifact", label: "File" },
       { kind: "shell", label: "Shell" },
     ],
+    paneStylesheets: ["/assets/service/css/qfw-slurm-cluster.css"],
     defaultPaneLayout: { type: "leaf", kind: "status" },
     layoutClass: "qfw-slurm-cluster-workflow",
     help: {
@@ -1626,6 +3001,7 @@
       container.replaceChildren(element("p", "", "Cluster dashboard"));
     },
     renderProjectStatus() { return true; },
+    mountPane: mountWorkflowPane,
     activate,
     deactivate,
     actions: { refresh: () => refreshState() },

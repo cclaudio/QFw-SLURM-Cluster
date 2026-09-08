@@ -137,6 +137,7 @@
     let lastPayload = null;
     let lastMarkup = "";
     let lastUpdate = 0;
+    let renderPending = false;
     let camera = { x: 24, y: 24, scale: 1 };
     let pan = null;
 
@@ -160,6 +161,62 @@
       publishPresentation({ popout_camera: { ...camera } });
     }
 
+    function confirmWidgetAction(title, message, danger = false) {
+      return new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        overlay.className = `qfw-notification-overlay qfw-notification-${
+          danger ? "danger" : "warning"
+        }`;
+        const dialog = document.createElement("section");
+        dialog.className = "qfw-notification-dialog";
+        dialog.setAttribute("role", "alertdialog");
+        dialog.setAttribute("aria-modal", "true");
+        const heading = document.createElement("header");
+        heading.className = "qfw-notification-header";
+        const indicator = document.createElement("span");
+        indicator.className = "qfw-notification-indicator";
+        indicator.textContent = danger ? "DANGER" : "WARNING";
+        const headingText = document.createElement("h2");
+        headingText.textContent = title;
+        heading.append(indicator, headingText);
+        const body = document.createElement("p");
+        body.className = "qfw-notification-message";
+        body.textContent = message;
+        const actions = document.createElement("footer");
+        actions.className = "qfw-notification-actions";
+        const cancel = document.createElement("button");
+        cancel.className = "qfw-notification-cancel";
+        cancel.type = "button";
+        cancel.textContent = "Cancel";
+        const confirm = document.createElement("button");
+        confirm.className = "qfw-notification-confirm";
+        confirm.type = "button";
+        confirm.textContent = "Continue";
+        actions.append(cancel, confirm);
+        dialog.append(heading, body, actions);
+        overlay.append(dialog);
+
+        function finish(accepted) {
+          document.removeEventListener("keydown", onKeyDown, true);
+          overlay.remove();
+          resolve(accepted);
+        }
+        function onKeyDown(event) {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          finish(false);
+        }
+        cancel.addEventListener("click", () => finish(false));
+        confirm.addEventListener("click", () => finish(true));
+        overlay.addEventListener("pointerdown", (event) => {
+          if (event.target === overlay) finish(false);
+        });
+        document.addEventListener("keydown", onKeyDown, true);
+        document.body.append(overlay);
+        window.requestAnimationFrame(() => confirm.focus());
+      });
+    }
+
     function zoomAt(clientX, clientY, factor) {
       const bounds = viewport.getBoundingClientRect();
       const localX = clientX - bounds.left;
@@ -177,7 +234,23 @@
       persistCamera();
     }
 
+    function scrollableWheelTarget(event, boundary) {
+      return event.composedPath().some((target) => {
+        if (!(target instanceof Element) || target === boundary) return false;
+        if (!boundary.contains(target)) return false;
+        const style = window.getComputedStyle(target);
+        const scrollsVertically = event.deltaY !== 0
+          && /^(auto|scroll)$/.test(style.overflowY)
+          && target.scrollHeight > target.clientHeight;
+        const scrollsHorizontally = event.deltaX !== 0
+          && /^(auto|scroll)$/.test(style.overflowX)
+          && target.scrollWidth > target.clientWidth;
+        return scrollsVertically || scrollsHorizontally;
+      });
+    }
+
     viewport.addEventListener("wheel", (event) => {
+      if (scrollableWheelTarget(event, viewport)) return;
       event.preventDefault();
       zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.0015));
     }, { passive: false });
@@ -217,8 +290,20 @@
     });
     resetView.addEventListener("click", () => {
       camera = { x: 24, y: 24, scale: 1 };
+      output.querySelectorAll("[data-qfw-preserve-scroll]").forEach((container) => {
+        container.style.removeProperty("height");
+        container.scrollLeft = 0;
+        container.scrollTop = 0;
+      });
+      const topologyZoom = output.querySelector(".qfw-topology-zoom");
+      const topologyGraph = output.querySelector(".qfw-topology-graph");
+      if (topologyZoom) topologyZoom.value = "100";
+      if (topologyGraph) topologyGraph.style.width = "100%";
       applyCamera();
-      persistCamera();
+      publishPresentation({
+        popout_camera: { ...camera },
+        ...(widget === "topology" ? { zoom: 100 } : {}),
+      });
     });
 
     function hydrateWidget() {
@@ -257,7 +342,7 @@
         });
       });
       output.querySelectorAll("[data-qfw-action]").forEach((button) => {
-        button.addEventListener("click", () => {
+        button.addEventListener("click", async () => {
           const values = Object.fromEntries(
             [...output.querySelectorAll("[data-qfw-control]")]
               .map((control) => [control.dataset.qfwControl, control.value]),
@@ -268,34 +353,40 @@
             : action === "open-shell"
               ? `Open a shell in ${values.node || "slurmctld"}?`
               : `Run ${values.operation || action}?`;
-          if (!window.confirm(description)) return;
+          const danger = action === "abort"
+            || ["stop", "restart", "rebuild", "drain"].includes(values.operation);
+          if (values.operation !== "status"
+              && !await confirmWidgetAction("Confirm operation", description, danger)) return;
           channel.postMessage({ type: "control-action", widget, action, values });
         });
       });
     }
 
     function captureMirrorScrollPositions() {
-      return [...output.querySelectorAll(
-        ".qfw-topology, .qfw-table-wrap, .qfw-alert-detail",
-      )]
+      return [...output.querySelectorAll("[data-qfw-preserve-scroll]")]
         .map((container) => ({
+          height: container.style.height,
           left: container.scrollLeft,
           top: container.scrollTop,
         }));
     }
 
     function restoreMirrorScrollPositions(positions) {
-      const containers = output.querySelectorAll(
-        ".qfw-topology, .qfw-table-wrap, .qfw-alert-detail",
-      );
+      const containers = output.querySelectorAll("[data-qfw-preserve-scroll]");
       positions.forEach((position, index) => {
         if (!containers[index]) return;
+        if (position.height) containers[index].style.height = position.height;
         containers[index].scrollLeft = position.left;
         containers[index].scrollTop = position.top;
       });
     }
 
     function render() {
+      if (output.contains(document.activeElement)) {
+        renderPending = true;
+        return;
+      }
+      renderPending = false;
       if (!lastMarkup) {
         output.textContent = lastPayload === null
           ? "Waiting for the dashboard data source…"
@@ -310,6 +401,11 @@
       restoreMirrorScrollPositions(scrollPositions);
     }
 
+    output.addEventListener("focusout", () => {
+      if (!renderPending) return;
+      window.requestAnimationFrame(render);
+    });
+
     filter.addEventListener("input", () => {
       render();
       publishPresentation({ filter: filter.value });
@@ -322,6 +418,19 @@
     });
     channel.addEventListener("message", (event) => {
       const message = event.data || {};
+      if (message.type === "reset") {
+        filter.value = "";
+        output.hidden = false;
+        collapse.textContent = "Collapse";
+        camera = { x: 24, y: 24, scale: 1 };
+        output.querySelectorAll("[data-qfw-preserve-scroll]").forEach((container) => {
+          container.style.removeProperty("height");
+          container.scrollLeft = 0;
+          container.scrollTop = 0;
+        });
+        applyCamera();
+        return;
+      }
       if (message.type !== "state" || message.instance_id !== instanceId) return;
       label.textContent = message.label;
       context.classList.remove("disconnected");
@@ -333,6 +442,7 @@
         output.hidden = !message.presentation.expanded;
         collapse.textContent = message.presentation.expanded ? "Collapse" : "Expand";
       }
+      output.classList.toggle("has-error", message.operation_failed === true);
       const savedCamera = message.presentation?.popout_camera;
       if (savedCamera && !pan) {
         camera = {
