@@ -447,10 +447,10 @@ COPY slurmdbd.conf /etc/slurm/slurmdbd.conf
 COPY rest.conf /etc/slurm/rest.conf
 COPY gres.conf /etc/slurm/gres.conf
 COPY config/qfw-slurm/burst_buffer.conf /etc/slurm/burst_buffer.conf
-COPY config/qfw-slurm/burst-buffer.lua.conf /etc/qfw-slurm/burst-buffer.lua.conf
-COPY config/qfw-slurm/resources.lua /etc/qfw-slurm/resources.lua
-COPY config/qfw-slurm/plugin.conf /etc/qfw-slurm/plugin.conf
-COPY config/qfw-slurm/gateway.yaml /etc/qfw-slurm/gateway.yaml
+COPY config/qfw-slurm/burst-buffer.lua.conf /etc/openqse/qfw-slurm/burst-buffer.lua.conf
+COPY config/qfw-slurm/resources.lua /etc/openqse/qfw-slurm/resources.lua
+COPY config/qfw-slurm/plugin.conf /etc/openqse/qfw-slurm/plugin.conf
+COPY config/qfw-slurm/gateway.yaml /etc/openqse/qfw-slurm/gateway.yaml
 COPY config/qfw-slurm/plugstack.conf /etc/slurm/plugstack.conf
 RUN set -x \
     && groupadd -r qfw-slurm \
@@ -470,15 +470,15 @@ RUN set -x \
     && chown slurm:slurm /etc/slurm/slurmdbd.conf \
     && chown root:root /etc/slurm/job_submit.lua \
         /etc/slurm/burst_buffer.lua /etc/slurm/burst_buffer.conf \
-        /etc/slurm/plugstack.conf /etc/qfw-slurm/resources.lua \
-        /etc/qfw-slurm/burst-buffer.lua.conf \
-    && chown root:slurm /etc/qfw-slurm/plugin.conf \
-    && chown root:qfw-slurm /etc/qfw-slurm/gateway.yaml \
+        /etc/slurm/plugstack.conf /etc/openqse/qfw-slurm/resources.lua \
+        /etc/openqse/qfw-slurm/burst-buffer.lua.conf \
+    && chown root:slurm /etc/openqse/qfw-slurm/plugin.conf \
+    && chown root:qfw-slurm /etc/openqse/qfw-slurm/gateway.yaml \
     && chmod 0644 /etc/slurm/job_submit.lua /etc/slurm/burst_buffer.lua \
         /etc/slurm/burst_buffer.conf /etc/slurm/plugstack.conf \
-        /etc/qfw-slurm/resources.lua \
-    && chmod 0640 /etc/qfw-slurm/plugin.conf \
-        /etc/qfw-slurm/gateway.yaml \
+        /etc/openqse/qfw-slurm/resources.lua \
+    && chmod 0640 /etc/openqse/qfw-slurm/plugin.conf \
+        /etc/openqse/qfw-slurm/gateway.yaml \
     && chmod 600 /etc/slurm/jwt.key \
     && chmod 600 /etc/slurm/slurmdbd.conf \
     && test -x /usr/lib64/slurm/job_submit_lua.so \
@@ -486,7 +486,7 @@ RUN set -x \
     && test -x /usr/lib64/slurm/spank_quantum.so \
     && test -f /etc/slurm/job_submit.lua \
     && test -f /etc/slurm/burst_buffer.lua \
-    && test -f /etc/qfw-slurm/plugin.conf
+    && test -f /etc/openqse/qfw-slurm/plugin.conf
 
 RUN set -x \
     &&  useradd -r -g users --uid=1010 -m -c "Solomon Grundy" sgrundy
