@@ -5,6 +5,7 @@ qfw-site-services \- manage the virtual cluster QFw service plane
 .B qfw-site-services
 .RB [ \-\-dry-run ]
 .RB [ \-\-target " " target ]
+.RB [ \-\-json ]
 .BR start | status | stop | restart | recover
 .SH DESCRIPTION
 .B qfw-site-services
@@ -21,11 +22,18 @@ Start the selected target.  The default
 .B all
 target starts the directory service, NWQSim service, IQM service, and gateway
 in dependency order.  Partial aggregate startup failure removes only
-components created by that invocation.  Starting a QPM or gateway target
-requires a ready directory service.
+components created by that invocation.  A target that is not ready is stopped
+to clean retained runtime state before it is started.  A ready target is left
+running.  Starting a QPM or gateway target requires a ready directory service.
 .TP
 .B status
-Report the state of each service manager and the gateway endpoint.
+Check the selected service managers and gateway endpoint, then print a concise
+overall health summary.  An unavailable service is reported as
+.BR DOWN ;
+that health result does not make the status command fail.  The command fails
+only when it cannot complete or interpret a health check.  Machine-readable
+status retains the underlying manager record, including stale-state details,
+for diagnosis.
 .TP
 .B stop
 Stop the selected target.  The default aggregate action stops the gateway,
@@ -54,6 +62,12 @@ The default is
 .TP
 .B \-\-dry-run
 Print the remote commands and dependency order without executing them.
+.TP
+.B \-\-json
+For the
+.B status
+action, emit one machine-readable status document containing the overall
+health, per-service health, and detailed manager records.
 .SH ENVIRONMENT
 The command accepts administrator overrides through
 .BR QFW_INSTALL_PREFIX ,

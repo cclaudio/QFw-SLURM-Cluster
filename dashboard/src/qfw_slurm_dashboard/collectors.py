@@ -207,49 +207,32 @@ def _first_json_object(text: str) -> dict[str, Any] | None:
 
 
 def service_plane_status(runner: CommandRunner) -> SourceState:
-    result = runner.cluster("root", ("qfw-site-services", "status"), timeout=12)
+    result = runner.cluster(
+        "root", ("qfw-site-services", "status", "--json"), timeout=12)
     output = f"{result.stdout}\n{result.stderr}"
-    headings = (
-        ("directory", "Directory service"),
-        ("nwqsim", "NWQSim QPM"),
-        ("iqm", "IQM QPM"),
-        ("gateway", "QFw Slurm gateway"),
-    )
+    payload = _first_json_object(output) or {}
+    services = payload.get("services") or {}
     records: list[dict[str, Any]] = []
-    lines = output.splitlines()
-    for component, heading in headings:
-        index = next(
-            (position for position, line in enumerate(lines) if line.startswith(heading)),
-            -1,
-        )
-        detail = ""
-        if index >= 0:
-            end = next((
-                position for position in range(index + 1, len(lines))
-                if any(lines[position].startswith(value) for _, value in headings)
-            ), len(lines))
-            detail = "\n".join(lines[index + 1:end])
-        document = _first_json_object(detail)
+    for component in ("directory", "nwqsim", "iqm", "gateway"):
+        entry = services.get(component) or {}
+        document = entry.get("detail") if isinstance(entry, dict) else {}
+        document = document if isinstance(document, dict) else {}
         component_key = {
             "directory": "directory",
             "nwqsim": "qpm:nwqsim",
             "iqm": "qpm:iqm-ornl-20q",
         }.get(component)
-        managed = (document or {}).get("components", {}).get(component_key, {}) \
+        managed = document.get("components", {}).get(component_key, {}) \
             if component_key else {}
         if isinstance(managed, dict) and managed:
             component_state = str(managed.get("state", "stopped")).lower()
             ready = managed.get("ready", component_state == "ready")
             component_state = "ready" if ready and component_state == "ready" else "stopped"
         else:
-            lowered = detail.lower()
-            failed = result.returncode != 0 and (not detail or any(
-                marker in lowered for marker in (
-                    "not found", "not-ready", "traceback", "refused",
-                    "failed", "stopped",
-                )
-            ))
-            component_state = "stopped" if failed else "ready"
+            component_state = (
+                "ready" if str(entry.get("state", "down")).lower() == "up"
+                else "stopped"
+            )
         records.append({
             "component": component,
             "service_id": {
@@ -269,10 +252,10 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
                 "gateway": "QSGP",
             }[component],
             "active_reservations": "—",
-            "detail": detail[-1000:],
+            "detail": json.dumps(document, indent=2, sort_keys=True)[-1000:],
         })
         if component == "nwqsim":
-            dvm = (document or {}).get("components", {}).get("prte-dvm", {})
+            dvm = document.get("components", {}).get("prte-dvm", {})
             dvm_ready = isinstance(dvm, dict) and dvm.get("ready") is True \
                 and dvm.get("state") == "ready"
             records.append({
@@ -282,6 +265,8 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
                 "backend": "PRTE", "active_reservations": "—",
                 "detail": "NWQSim PRTE DVM",
             })
+    if not services:
+        return SourceState("service-plane", "error", utc_now(), [], output[-1000:])
     ready = sum(item["state"] == "ready" for item in records)
     status = "ready" if ready == len(records) else "degraded" if ready else "stopped"
     return SourceState("service-plane", status, utc_now(), records)

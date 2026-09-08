@@ -504,9 +504,9 @@ def test_individual_qpm_action_runs_on_service_node(tmp_path) -> None:
     assert operation.status == "succeeded"
 
 
-def test_service_status_returns_detailed_manager_output(tmp_path) -> None:
+def test_service_status_returns_concise_health_output(tmp_path) -> None:
     dashboard = service(tmp_path)
-    detail = "Directory service (slurmctld)\n{\"state\":\"ready\"}\n"
+    detail = "QFw site services: DOWN\n\nDirectory: DOWN\nNWQSim: STALE\n"
 
     def stream(command, on_line, **_kwargs):
         for line in detail.splitlines():
@@ -522,7 +522,7 @@ def test_service_status_returns_detailed_manager_output(tmp_path) -> None:
     argv = host.call_args.args[0]
     assert "qfw-site-services status --target all" in argv[-1]
     assert operation.status == "succeeded"
-    assert any("Directory service" in line for line in operation.output)
+    assert any("QFw site services: DOWN" in line for line in operation.output)
 
 
 def test_service_action_rejects_unknown_target(tmp_path) -> None:

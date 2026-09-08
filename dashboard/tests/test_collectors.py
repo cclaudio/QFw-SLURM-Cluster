@@ -37,7 +37,16 @@ class FakeRunner:
                 '{"schema":"qfw-squeue-v1","errors":[],"jobs":[]}\n', ""
             )
         if command == "qfw-site-services":
-            return CommandResult(tuple(argv), 1, "Directory service\nstate not found\n", "")
+            return CommandResult(
+                tuple(argv), 0,
+                '{"schema":"qfw-site-services-status-v1","state":"down",'
+                '"services":{'
+                '"directory":{"state":"down","detail":{"state":"stopped"}},'
+                '"nwqsim":{"state":"down","detail":{"state":"stopped"}},'
+                '"iqm":{"state":"down","detail":{"state":"stopped"}},'
+                '"gateway":{"state":"down","detail":{"state":"stopped"}}}}\n',
+                "",
+            )
         raise AssertionError(command)
 
 
@@ -142,16 +151,19 @@ def test_slurm_multiline_pending_reason_is_one_job_record() -> None:
 def test_service_plane_reports_each_component_independently() -> None:
     class PartialServiceRunner:
         def cluster(self, identity, argv, **kwargs):
-            output = """Directory service (slurmctld)
-{"components":{"directory":{"node":"slurmctld","ready":false,"state":"stopped"}}}
-NWQSim QPM (nwqsim-head)
-{"components":{"prte-dvm":{"node":"nwqsim-head","ready":true,"state":"ready"},"qpm:nwqsim":{"node":"nwqsim-head","ready":true,"state":"ready"}}}
-IQM QPM (iqm-head)
-{"components":{"qpm:iqm-ornl-20q":{"node":"iqm-head","ready":true,"state":"ready"}}}
-QFw Slurm gateway (slurmctld:18095)
-ready
+            assert argv == ("qfw-site-services", "status", "--json")
+            output = """{
+  "schema":"qfw-site-services-status-v1",
+  "state":"down",
+  "services":{
+    "directory":{"state":"down","detail":{"components":{"directory":{"node":"slurmctld","ready":false,"state":"stopped"}}}},
+    "nwqsim":{"state":"up","detail":{"components":{"prte-dvm":{"node":"nwqsim-head","ready":true,"state":"ready"},"qpm:nwqsim":{"node":"nwqsim-head","ready":true,"state":"ready"}}}},
+    "iqm":{"state":"up","detail":{"components":{"qpm:iqm-ornl-20q":{"node":"iqm-head","ready":true,"state":"ready"}}}},
+    "gateway":{"state":"up","detail":{"state":"ready"}}
+  }
+}
 """
-            return CommandResult(tuple(argv), 1, output, "")
+            return CommandResult(tuple(argv), 0, output, "")
 
     source = service_plane_status(PartialServiceRunner())
     records = {item["component"]: item for item in source.records}
