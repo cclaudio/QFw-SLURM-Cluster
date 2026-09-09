@@ -1513,6 +1513,9 @@ class DashboardService:
         experiment = self._owned_experiment(experiment_id, identity)
         owner = str(experiment.get("identity"))
         prefix = f"/workspace/home/{owner}/"
+        artifacts = list(experiment.get("artifacts", []))
+        self._collect_experiment_log_artifact_paths(owner, experiment, artifacts)
+        archived_experiment = {**experiment, "artifacts": artifacts}
         missing: list[str] = []
         archive_buffer = io.BytesIO()
         with zipfile.ZipFile(
@@ -1520,15 +1523,15 @@ class DashboardService:
         ) as archive:
             archive.writestr(
                 "experiment.json",
-                json.dumps(experiment, indent=2, sort_keys=True) + "\n",
+                json.dumps(archived_experiment, indent=2, sort_keys=True) + "\n",
             )
-            for index, artifact_path in enumerate(experiment.get("artifacts", [])):
+            for index, artifact_path in enumerate(artifacts):
                 path = str(artifact_path)
                 if not path.startswith(prefix):
                     missing.append(f"{path}: outside experiment home")
                     continue
                 try:
-                    data = self._read_artifact(owner, path)
+                    data = self._read_artifact(owner, path, max_bytes=67108864)
                 except RuntimeError as error:
                     missing.append(f"{path}: {error}")
                     continue
@@ -1579,7 +1582,8 @@ class DashboardService:
             for diagnostic in files:
                 try:
                     data = self._read_cluster_file(
-                        "root", diagnostic.container, diagnostic.path
+                        "root", diagnostic.container, diagnostic.path,
+                        max_bytes=67108864,
                     )
                 except RuntimeError as error:
                     missing.append(f"{diagnostic.path}: {error}")
@@ -1601,8 +1605,12 @@ class DashboardService:
             "content_base64": base64.b64encode(data).decode("ascii"),
         }
 
-    def _read_artifact(self, owner: str, path: str) -> bytes:
-        return self._read_cluster_file(owner, "slurmctld", path)
+    def _read_artifact(
+        self, owner: str, path: str, *, max_bytes: int = 8388608
+    ) -> bytes:
+        return self._read_cluster_file(
+            owner, "slurmctld", path, max_bytes=max_bytes
+        )
 
     @staticmethod
     def _experiment_log_archive_root(experiment: Any) -> str:
@@ -1616,20 +1624,32 @@ class DashboardService:
         return str(Path(output_path).parent / "defw-logs")
 
     def _collect_experiment_log_artifacts(self, experiment: Experiment) -> None:
+        self._collect_experiment_log_artifact_paths(
+            experiment.identity, experiment, experiment.artifacts
+        )
+
+    def _collect_experiment_log_artifact_paths(
+        self, identity: str, experiment: Any, artifacts: list[str]
+    ) -> None:
         root = self._experiment_log_archive_root(experiment)
-        prefix = f"/workspace/home/{experiment.identity}/"
+        prefix = f"/workspace/home/{identity}/"
         if not root.startswith(prefix):
             return
         result = self.runner.cluster(
-            experiment.identity,
+            identity,
             ("find", root, "-maxdepth", "8", "-type", "f"),
             timeout=15,
         )
         if result.returncode:
             return
+        log_prefix = f"{root.rstrip('/')}/"
         for path in sorted(line.strip() for line in result.stdout.splitlines()):
-            if path.startswith(prefix) and path not in experiment.artifacts:
-                experiment.artifacts.append(path)
+            if (
+                path.startswith(prefix)
+                and path.startswith(log_prefix)
+                and path not in artifacts
+            ):
+                artifacts.append(path)
 
     def _archive_artifact_name(
         self, experiment: dict[str, Any], index: int, path: str
@@ -1641,16 +1661,20 @@ class DashboardService:
                 return f"logs/{relative}"
         return f"artifacts/{index:02d}-{Path(path).name}"
 
-    def _read_cluster_file(self, identity: str, container: str, path: str) -> bytes:
+    def _read_cluster_file(
+        self, identity: str, container: str, path: str, *,
+        max_bytes: int = 8388608,
+    ) -> bytes:
         reader = (
             "import base64, pathlib, sys; "
             "p=pathlib.Path(sys.argv[1]); "
             "data=p.read_bytes(); "
-            "assert len(data) <= 8388608, 'artifact exceeds 8 MiB'; "
+            "limit=int(sys.argv[2]); "
+            "assert len(data) <= limit, f'artifact exceeds {limit} bytes'; "
             "print(base64.b64encode(data).decode('ascii'))"
         )
         result = self.runner.cluster(
-            identity, ("python3", "-c", reader, path),
+            identity, ("python3", "-c", reader, path, str(max_bytes)),
             container=container, timeout=15,
         )
         if result.returncode:

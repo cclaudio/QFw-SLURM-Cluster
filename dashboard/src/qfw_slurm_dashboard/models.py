@@ -55,6 +55,7 @@ class Experiment:
     reservations: list[list[str]] = field(default_factory=list)
     operation_id: str = ""
     created_at: str = field(default_factory=utc_now)
+    modified_at: str = field(default_factory=utc_now)
     completed_at: str = ""
     result: dict[str, Any] = field(default_factory=dict)
     artifacts: list[str] = field(default_factory=list)

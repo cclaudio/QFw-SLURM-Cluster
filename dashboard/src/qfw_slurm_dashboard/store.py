@@ -51,6 +51,7 @@ class DashboardStore:
 
     def save_experiment(self, experiment: Experiment) -> None:
         with self._lock:
+            experiment.modified_at = utc_now()
             payload = redact_payload(experiment.payload())
             self._write(
                 f"experiments/{experiment.experiment_id}.json", payload

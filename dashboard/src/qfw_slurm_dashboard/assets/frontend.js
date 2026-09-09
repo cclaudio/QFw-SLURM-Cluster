@@ -587,6 +587,14 @@
     return wrapper;
   }
 
+  function experimentModifiedAt(experiment) {
+    return experiment.modified_at
+      || experiment.completed_at
+      || experiment.manifest?.submitted_at
+      || experiment.created_at
+      || "";
+  }
+
   function experimentTable(records, results) {
     const wrapper = preserveScroll(element("div", "qfw-table-wrap"));
     const value = element("table", "qfw-table");
@@ -598,69 +606,108 @@
       ["backend", "Backend"],
       ["example", "Example"],
       ["status", "State"],
+      ["modified_at", "Modified At"],
       ["slurm_job_id", "Job"],
       ["action", results ? "Download" : "Action"],
     ];
-    columns.forEach(([, label]) => header.append(element("th", "", label)));
-    head.append(header);
+    const display = (experiment, key) => {
+      if (key === "modified_at") return experimentModifiedAt(experiment) || "—";
+      return experiment[key] ?? "—";
+    };
+    let sortKey = results ? "modified_at" : "";
+    let sortDirection = results ? -1 : 1;
+    let sortedRecords = [...records];
+    const compare = (left, right, key) => String(display(left, key) ?? "")
+      .localeCompare(String(display(right, key) ?? ""), undefined, {
+        numeric: true,
+      }) * sortDirection;
     const body = element("tbody");
-    records.forEach((experiment) => {
-      const row = element("tr");
-      columns.slice(0, -1).forEach(([key]) => {
-        row.append(element("td", "", experiment[key] ?? "—"));
-      });
-      const action = element("td");
-      if (results) {
-        const download = element("button", "", "Download ZIP");
-        download.type = "button";
-        download.addEventListener("click", async () => {
-          try {
-            const payload = await request(
-              "/api/qfw-dashboard/experiments/archive"
-                + `?experiment_id=${encodeURIComponent(experiment.experiment_id)}`
-                + `&identity=${encodeURIComponent(activeIdentity)}`,
-            );
-            downloadBase64(payload);
-          } catch (error) {
-            await notifyDashboard("Download failed", error.message, "danger");
-          }
-        });
-        action.append(download);
-      } else if (experiment.slurm_job_id) {
-        const cancel = element("button", "danger", "Cancel");
-        cancel.type = "button";
-        cancel.addEventListener("click", async () => {
-          if (!await confirmDashboardAction(
-            "Cancel experiment",
-            `Cancel ${experiment.experiment_id}? Its Slurm allocation will be terminated.`,
-            { severity: "danger", confirmLabel: "Cancel experiment" },
-          )) return;
-          try {
-            await request("/api/qfw-dashboard/experiments/cancel", {
-              method: "POST",
-              body: JSON.stringify({
-                experiment_id: experiment.experiment_id,
-                identity: activeIdentity,
-              }),
-            });
-          } catch (error) {
-            await notifyDashboard("Cancellation failed", error.message, "danger");
-          }
-        });
-        action.append(cancel);
-      } else {
-        action.textContent = "—";
+    function sortRecords() {
+      sortedRecords = [...records];
+      if (sortKey) {
+        sortedRecords.sort((left, right) => compare(left, right, sortKey));
       }
-      row.append(action);
-      body.append(row);
-    });
-    if (!records.length) {
-      const row = element("tr");
-      const cell = element("td", "qfw-empty", "No records");
-      cell.colSpan = columns.length;
-      row.append(cell);
-      body.append(row);
     }
+    columns.forEach(([key, label]) => {
+      const heading = element("th");
+      if (key === "action") {
+        heading.textContent = label;
+      } else {
+        const sort = element("button", "qfw-table-sort", label);
+        sort.type = "button";
+        sort.addEventListener("click", () => {
+          sortDirection = sortKey === key ? -sortDirection : 1;
+          sortKey = key;
+          sortRecords();
+          renderRows();
+        });
+        heading.append(sort);
+      }
+      header.append(heading);
+    });
+    head.append(header);
+    function renderRows() {
+      body.replaceChildren();
+      sortedRecords.forEach((experiment) => {
+        const row = element("tr");
+        columns.slice(0, -1).forEach(([key]) => {
+          row.append(element("td", "", display(experiment, key)));
+        });
+        const action = element("td");
+        if (results) {
+          const download = element("button", "", "Download ZIP");
+          download.type = "button";
+          download.addEventListener("click", async () => {
+            try {
+              const payload = await request(
+                "/api/qfw-dashboard/experiments/archive"
+                  + `?experiment_id=${encodeURIComponent(experiment.experiment_id)}`
+                  + `&identity=${encodeURIComponent(activeIdentity)}`,
+              );
+              downloadBase64(payload);
+            } catch (error) {
+              await notifyDashboard("Download failed", error.message, "danger");
+            }
+          });
+          action.append(download);
+        } else if (experiment.slurm_job_id) {
+          const cancel = element("button", "danger", "Cancel");
+          cancel.type = "button";
+          cancel.addEventListener("click", async () => {
+            if (!await confirmDashboardAction(
+              "Cancel experiment",
+              `Cancel ${experiment.experiment_id}? Its Slurm allocation will be terminated.`,
+              { severity: "danger", confirmLabel: "Cancel experiment" },
+            )) return;
+            try {
+              await request("/api/qfw-dashboard/experiments/cancel", {
+                method: "POST",
+                body: JSON.stringify({
+                  experiment_id: experiment.experiment_id,
+                  identity: activeIdentity,
+                }),
+              });
+            } catch (error) {
+              await notifyDashboard("Cancellation failed", error.message, "danger");
+            }
+          });
+          action.append(cancel);
+        } else {
+          action.textContent = "—";
+        }
+        row.append(action);
+        body.append(row);
+      });
+      if (!sortedRecords.length) {
+        const row = element("tr");
+        const cell = element("td", "qfw-empty", "No records");
+        cell.colSpan = columns.length;
+        row.append(cell);
+        body.append(row);
+      }
+    }
+    sortRecords();
+    renderRows();
     value.append(head, body);
     wrapper.append(value);
     return wrapper;

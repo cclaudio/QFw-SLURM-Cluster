@@ -69,10 +69,10 @@ SOURCES = {
 
 SERVICE_DIAGNOSTICS = {
     "directory-service": (
-        DiagnosticFile("logs/defw-py.log", "slurmctld",
+        DiagnosticFile("logs/defw_py.log", "slurmctld",
                        "/var/lib/qfw-site-services/directory/services/"
                        "qfw-site-dirsvc/logs/defw_py.log"),
-        DiagnosticFile("logs/defw-out.log", "slurmctld",
+        DiagnosticFile("logs/defw_out.log", "slurmctld",
                        "/var/lib/qfw-site-services/directory/services/"
                        "qfw-site-dirsvc/logs/defw_out.log"),
         DiagnosticFile("logs/stdout.log", "slurmctld",
@@ -93,10 +93,10 @@ SERVICE_DIAGNOSTICS = {
                        "/var/log/qfw-slurm-gateway/gateway.log"),
     ),
     "nwqsim": (
-        DiagnosticFile("logs/defw-py.log", "nwqsim-head",
+        DiagnosticFile("logs/defw_py.log", "nwqsim-head",
                        "/var/lib/qfw-site-services/qpm/nwqsim/services/"
                        "nwqsim/logs/defw_py.log"),
-        DiagnosticFile("logs/defw-out.log", "nwqsim-head",
+        DiagnosticFile("logs/defw_out.log", "nwqsim-head",
                        "/var/lib/qfw-site-services/qpm/nwqsim/services/"
                        "nwqsim/logs/defw_out.log"),
         DiagnosticFile("logs/stdout.log", "nwqsim-head",
@@ -123,10 +123,10 @@ SERVICE_DIAGNOSTICS = {
                        "/var/lib/qfw-site-services/qpm/nwqsim/prte_dvm/dvm-uri"),
     ),
     "iqm-ornl-20q": (
-        DiagnosticFile("logs/defw-py.log", "iqm-head",
+        DiagnosticFile("logs/defw_py.log", "iqm-head",
                        "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
                        "iqm-ornl-20q/logs/defw_py.log"),
-        DiagnosticFile("logs/defw-out.log", "iqm-head",
+        DiagnosticFile("logs/defw_out.log", "iqm-head",
                        "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
                        "iqm-ornl-20q/logs/defw_out.log"),
         DiagnosticFile("logs/stdout.log", "iqm-head",

@@ -90,8 +90,8 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert 'viewport.addEventListener("lostpointercapture", finishPan)' in frontend
     assert "stage.style.zoom = String(camera.scale)" in frontend
     assert "stage.style.transform" not in frontend
-    assert 'zoom.type = "number"' in frontend
-    assert 'zoom.type = "range"' not in frontend
+    assert 'zoom.type = "range"' in frontend
+    assert 'zoomSlider.type = "range"' in frontend
     assert "Math.min(2.25" not in frontend
     assert "Math.max(0.35" not in frontend
     assert "Loading live topology sources:" in frontend

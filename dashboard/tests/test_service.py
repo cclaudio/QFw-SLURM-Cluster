@@ -686,15 +686,20 @@ def test_experiment_archive_contains_manifest_and_all_artifacts(tmp_path) -> Non
         "defw-logs/application/logs/defw_py.log",
     ]
     dashboard.store.save_experiment(item)
-    encoded = [
-        base64.b64encode(b"application output\n").decode(),
-        base64.b64encode(b"#!/bin/bash\n").decode(),
-        base64.b64encode(b"defw app log\n").decode(),
-    ]
+    files = {
+        "/workspace/home/user-a/job.out": b"application output\n",
+        "/workspace/home/user-a/job.sbatch": b"#!/bin/bash\n",
+        "/workspace/home/user-a/qfw-dashboard/experiments/result/"
+        "defw-logs/application/logs/defw_py.log": b"defw app log\n",
+    }
     with patch.object(dashboard.runner, "cluster") as cluster:
-        cluster.side_effect = [
-            CommandResult(("python3",), 0, value, "") for value in encoded
-        ]
+        def respond(identity, argv, **kwargs):
+            if argv[0] == "find":
+                return CommandResult(argv, 0, "\n".join(files) + "\n", "")
+            return CommandResult(
+                argv, 0, base64.b64encode(files[argv[-2]]).decode(), ""
+            )
+        cluster.side_effect = respond
         payload = dashboard.experiment_archive("result", "user-a")
     archive_data = base64.b64decode(payload["content_base64"])
     with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
@@ -715,6 +720,46 @@ def test_experiment_archive_contains_manifest_and_all_artifacts(tmp_path) -> Non
         dashboard.experiment_archive("result", "user-b")
 
 
+def test_experiment_archive_rescans_defw_logs_on_download(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    item = Experiment("result", "user-a", "nwqsim", "qiskit-simple", "normal")
+    item.manifest["output_path"] = (
+        "/workspace/home/user-a/qfw-dashboard/experiments/result/slurm.out"
+    )
+    item.artifacts = [
+        "/workspace/home/user-a/qfw-dashboard/experiments/result/slurm.out",
+    ]
+    dashboard.store.save_experiment(item)
+    log_root = (
+        "/workspace/home/user-a/qfw-dashboard/experiments/result/defw-logs"
+    )
+    files = {
+        "/workspace/home/user-a/qfw-dashboard/experiments/result/slurm.out":
+        b"application output\n",
+        f"{log_root}/application/logs/defw_py.log": b"python log\n",
+        f"{log_root}/application/logs/defw_out.log": b"native log\n",
+    }
+    with patch.object(dashboard.runner, "cluster") as cluster:
+        def respond(identity, argv, **kwargs):
+            if argv[0] == "find":
+                return CommandResult(argv, 0, "\n".join(files) + "\n", "")
+            return CommandResult(
+                argv, 0, base64.b64encode(files[argv[-2]]).decode(), ""
+            )
+        cluster.side_effect = respond
+        payload = dashboard.experiment_archive("result", "user-a")
+    archive_data = base64.b64decode(payload["content_base64"])
+    with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
+        assert "logs/application/logs/defw_py.log" in archive.namelist()
+        assert "logs/application/logs/defw_out.log" in archive.namelist()
+        assert archive.read("logs/application/logs/defw_py.log") == (
+            b"python log\n"
+        )
+        assert archive.read("logs/application/logs/defw_out.log") == (
+            b"native log\n"
+        )
+
+
 def test_service_archive_is_root_only_and_contains_diagnostics(tmp_path) -> None:
     from qfw_slurm_dashboard.logs import SERVICE_DIAGNOSTICS
     dashboard = service(tmp_path)
@@ -726,19 +771,19 @@ def test_service_archive_is_root_only_and_contains_diagnostics(tmp_path) -> None
         item.path for item in SERVICE_DIAGNOSTICS["directory-service"]
     }
     read_paths = {
-        call.args[1][-1] for call in cluster.call_args_list
+        call.args[1][-2] for call in cluster.call_args_list
         if call.args[1][0:2] == ("python3", "-c")
-        and call.args[1][-1] in diagnostic_paths
+        and call.args[1][-2] in diagnostic_paths
     }
     assert read_paths == diagnostic_paths
     archive_data = base64.b64decode(payload["content_base64"])
     with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
         assert "service-status.json" in archive.namelist()
-        assert "logs/defw-out.log" in archive.namelist()
-        assert "logs/defw-py.log" in archive.namelist()
+        assert "logs/defw_out.log" in archive.namelist()
+        assert "logs/defw_py.log" in archive.namelist()
         assert "state/service-plane.json" in archive.namelist()
-        assert b"secret" not in archive.read("logs/defw-py.log")
-        assert b"[REDACTED]" in archive.read("logs/defw-py.log")
+        assert b"secret" not in archive.read("logs/defw_py.log")
+        assert b"[REDACTED]" in archive.read("logs/defw_py.log")
     assert payload["mime_type"] == "application/zip"
     with pytest.raises(PermissionError):
         dashboard.service_archive("directory-service", "user-a")
