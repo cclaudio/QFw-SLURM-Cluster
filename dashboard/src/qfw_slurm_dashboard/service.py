@@ -971,13 +971,10 @@ class DashboardService:
 
     @staticmethod
     def _defw_py_loglevel(value: Any) -> str:
-        tokens = [token.strip() for token in str(value).split(",")]
-        invalid_tokens = [
-            token for token in tokens if token not in DEFW_PY_LOG_LEVEL_TOKENS
-        ]
-        if not tokens or invalid_tokens:
+        level = str(value).strip()
+        if level not in DEFW_PY_LOG_LEVEL_TOKENS:
             raise ValueError("invalid defw_py.log level")
-        return ",".join(tokens)
+        return level
 
     def _service_log_environment(self, options: dict[str, Any]) -> dict[str, str]:
         environment: dict[str, str] = {}

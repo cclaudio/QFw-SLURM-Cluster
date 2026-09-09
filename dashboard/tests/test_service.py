@@ -487,17 +487,18 @@ def test_submission_forwards_logging_levels(tmp_path) -> None:
                 "backend": "nwqsim",
                 "example": "qiskit-simple",
                 "defw_log_level": "debug",
-                "defw_py_loglevel": "debug,DEFW_ALL",
+                "defw_py_loglevel": "DEFW_ALL",
             })
     batch = written_batch_script(cluster)
     assert "export DEFW_LOG_LEVEL=debug" in batch
-    assert "export DEFW_PY_LOGLEVEL=debug,DEFW_ALL" in batch
+    assert "export DEFW_PY_LOGLEVEL=DEFW_ALL" in batch
 
 
 @pytest.mark.parametrize(
     "logging_options",
     (
         {"defw_log_level": "verbose"},
+        {"defw_py_loglevel": "debug,DEFW_ALL"},
         {"defw_py_loglevel": "debug;rm"},
     ),
 )
@@ -601,12 +602,12 @@ def test_service_action_forwards_logging_levels(tmp_path) -> None:
                 target="nwqsim",
                 options={
                     "defw_log_level": "all",
-                    "defw_py_loglevel": "debug,DEFW_ALL",
+                    "defw_py_loglevel": "DEFW_ALL",
                 },
             )
     command = host.call_args.args[0][-1]
     assert "QFW_SERVICE_DEFW_LOG_LEVEL=all" in command
-    assert "QFW_SERVICE_DEFW_PY_LOGLEVEL=debug,DEFW_ALL" in command
+    assert "QFW_SERVICE_DEFW_PY_LOGLEVEL=DEFW_ALL" in command
     assert "qfw-site-services restart --target nwqsim" in command
 
 

@@ -79,7 +79,6 @@
     ["DEFW_CORE", "DEFw core"],
     ["DEFW_STACKTRACE", "DEFw stacktrace"],
     ["DEFW_ALL", "DEFw all"],
-    ["debug,DEFW_ALL", "Debug + DEFw all"],
   ];
   const SERVICE_ARCHIVE_IDS = new Set([
     "directory-service",
@@ -1813,7 +1812,7 @@
       widget, "defw_log_level", DEFW_OUT_LOG_LEVELS, "error",
     );
     const servicePyLogLevel = selectControl(
-      widget, "defw_py_loglevel", DEFW_PY_LOG_LEVELS, "debug,DEFW_ALL",
+      widget, "defw_py_loglevel", DEFW_PY_LOG_LEVELS, "DEFW_ALL",
     );
     const loggingNote = element(
       "p", "qfw-operation-help",
