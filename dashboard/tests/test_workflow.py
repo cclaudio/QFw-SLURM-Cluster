@@ -142,6 +142,11 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert '"qfw-topology-edge-service"' in frontend
     assert "const topologyServices" in frontend
     assert "const serviceRoles" in frontend
+    assert "function serviceTable(records)" in frontend
+    assert '"Download logs"' in frontend
+    assert '"/api/qfw-dashboard/services/archive"' in frontend
+    assert '"Next defw_out.log level"' in frontend
+    assert '"Next defw_py.log level"' in frontend
     assert "const JOB_COLORS" in frontend
     assert "function jobColor(jobId)" in frontend
     assert "const clusterNodes = new Map();" in frontend
@@ -179,7 +184,7 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
         "qfw-operation-output", "qfw-command-preview",
     ):
         assert scroll_region in frontend
-    assert frontend.count("preserveScroll(") == 7
+    assert frontend.count("preserveScroll(") == 8
     assert "Save preset" not in frontend
     assert "Compare selected results" not in frontend
     assert "/api/qfw-dashboard/experiments/archive" in frontend

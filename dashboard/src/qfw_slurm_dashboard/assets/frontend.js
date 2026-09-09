@@ -81,6 +81,13 @@
     ["DEFW_ALL", "DEFw all"],
     ["debug,DEFW_ALL", "Debug + DEFw all"],
   ];
+  const SERVICE_ARCHIVE_IDS = new Set([
+    "directory-service",
+    "qfw-slurm-gateway",
+    "nwqsim",
+    "nwqsim-dvm",
+    "iqm-ornl-20q",
+  ]);
   let runtimeApi = null;
   let activeIdentity = "user-a";
   let state = { health: "unavailable", sources: {}, operations: [], experiments: [] };
@@ -366,6 +373,39 @@
     void refreshEvents();
   }
 
+  async function downloadServiceArchive(serviceId, button = null) {
+    if (activeIdentity !== "root") {
+      await notifyDashboard(
+        "Service logs restricted",
+        "Select the root cluster identity to download service diagnostics.",
+        "danger",
+      );
+      return;
+    }
+    if (!serviceId) {
+      await notifyDashboard(
+        "Diagnostic download failed",
+        "The selected service does not have a service identifier.",
+        "danger",
+      );
+      return;
+    }
+    if (button) button.disabled = true;
+    try {
+      const payload = await request(
+        "/api/qfw-dashboard/services/archive"
+          + `?service_id=${encodeURIComponent(serviceId)}`
+          + `&identity=${encodeURIComponent(activeIdentity)}`,
+      );
+      downloadBase64(payload);
+    } catch (error) {
+      await notifyDashboard("Diagnostic download failed", error.message, "danger");
+    } finally {
+      if (button) button.disabled = activeIdentity !== "root"
+        || !SERVICE_ARCHIVE_IDS.has(serviceId);
+    }
+  }
+
   function showFailedService(service) {
     const overlay = element("div", "qfw-notification-overlay qfw-notification-danger");
     const dialog = element("section", "qfw-notification-dialog qfw-service-failure-dialog");
@@ -406,19 +446,7 @@
       void selectServiceLogs(service);
     });
     download.addEventListener("click", async () => {
-      download.disabled = true;
-      try {
-        const payload = await request(
-          "/api/qfw-dashboard/services/archive"
-            + `?service_id=${encodeURIComponent(service.id)}`
-            + `&identity=${encodeURIComponent(activeIdentity)}`,
-        );
-        downloadBase64(payload);
-      } catch (error) {
-        await notifyDashboard("Diagnostic download failed", error.message, "danger");
-      } finally {
-        download.disabled = !allowed;
-      }
+      await downloadServiceArchive(service.id, download);
     });
     close.addEventListener("click", finish);
     overlay.addEventListener("pointerdown", (event) => {
@@ -498,6 +526,57 @@
       }
     }
     renderRows();
+    value.append(head, body);
+    wrapper.append(value);
+    return wrapper;
+  }
+
+  function serviceTable(records) {
+    const wrapper = preserveScroll(element("div", "qfw-table-wrap"));
+    const value = element("table", "qfw-table");
+    const head = element("thead");
+    const header = element("tr");
+    const columns = [
+      ["service_id", "Service"],
+      ["node", "Node"],
+      ["state", "State"],
+      ["backend", "Backend"],
+      ["active_reservations", "Reservations"],
+      ["logs", "Logs"],
+    ];
+    columns.forEach(([, label]) => header.append(element("th", "", label)));
+    head.append(header);
+    const body = element("tbody");
+    records.forEach((service) => {
+      const row = element("tr");
+      columns.slice(0, -1).forEach(([key]) => {
+        row.append(element("td", "", service[key] ?? "—"));
+      });
+      const logs = element("td");
+      const serviceId = String(service.service_id || service.name || "");
+      const download = element("button", "", "Download logs");
+      download.type = "button";
+      download.disabled = activeIdentity !== "root"
+        || !SERVICE_ARCHIVE_IDS.has(serviceId);
+      if (activeIdentity !== "root") {
+        download.title = "Select root identity to download service diagnostics.";
+      } else if (!SERVICE_ARCHIVE_IDS.has(serviceId)) {
+        download.title = "No diagnostics archive is configured for this service.";
+      }
+      download.addEventListener("click", async () => {
+        await downloadServiceArchive(serviceId, download);
+      });
+      logs.append(download);
+      row.append(logs);
+      body.append(row);
+    });
+    if (!records.length) {
+      const row = element("tr");
+      const cell = element("td", "qfw-empty", "No records");
+      cell.colSpan = columns.length;
+      row.append(cell);
+      body.append(row);
+    }
     value.append(head, body);
     wrapper.append(value);
     return wrapper;
@@ -1234,10 +1313,7 @@
       ]);
     }
     if (id === "services") {
-      return table(payload, [
-        ["service_id", "Service"], ["node", "Node"], ["state", "State"],
-        ["backend", "Backend"], ["active_reservations", "Reservations"],
-      ]);
+      return serviceTable(payload);
     }
     if (id === "allocations") {
       return table(payload, [
@@ -1741,13 +1817,14 @@
     );
     const loggingNote = element(
       "p", "qfw-operation-help",
-      "Logging changes are applied when services are started, restarted, or recovered.",
+      "These levels are passed to qfw-site-services when the selected service "
+        + "is started, restarted, or recovered.",
     );
     services.append(
       operationField("Target", serviceTarget),
       operationField("Operation", serviceAction),
-      operationField("defw_out.log", serviceOutLogLevel),
-      operationField("defw_py.log", servicePyLogLevel),
+      operationField("Next defw_out.log level", serviceOutLogLevel),
+      operationField("Next defw_py.log level", servicePyLogLevel),
       loggingNote,
       operationButtons(widget, "services", async () => {
         const action = serviceAction.value;
