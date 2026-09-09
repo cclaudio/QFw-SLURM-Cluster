@@ -60,6 +60,27 @@
     "created", "submitting", "submitted", "pending",
     "configuring", "running", "completing", "cancel-requested",
   ]);
+  const DEFW_OUT_LOG_LEVELS = [
+    ["error", "Error"],
+    ["message", "Message"],
+    ["debug", "Debug"],
+    ["all", "All"],
+  ];
+  const DEFW_PY_LOG_LEVELS = [
+    ["critical", "Critical"],
+    ["error", "Error"],
+    ["warning", "Warning"],
+    ["info", "Info"],
+    ["debug", "Debug"],
+    ["DEFW_APP", "DEFw app"],
+    ["DEFW_SERVICE", "DEFw service"],
+    ["DEFW_RPC", "DEFw RPC"],
+    ["DEFW_WORKER", "DEFw worker"],
+    ["DEFW_CORE", "DEFw core"],
+    ["DEFW_STACKTRACE", "DEFw stacktrace"],
+    ["DEFW_ALL", "DEFw all"],
+    ["debug,DEFW_ALL", "Debug + DEFw all"],
+  ];
   let runtimeApi = null;
   let activeIdentity = "user-a";
   let state = { health: "unavailable", sources: {}, operations: [], experiments: [] };
@@ -1712,9 +1733,22 @@
       ["restart", "Restart"],
       ["recover", "Recover"],
     ], "status");
+    const serviceOutLogLevel = selectControl(
+      widget, "defw_log_level", DEFW_OUT_LOG_LEVELS, "error",
+    );
+    const servicePyLogLevel = selectControl(
+      widget, "defw_py_loglevel", DEFW_PY_LOG_LEVELS, "debug,DEFW_ALL",
+    );
+    const loggingNote = element(
+      "p", "qfw-operation-help",
+      "Logging changes are applied when services are started, restarted, or recovered.",
+    );
     services.append(
       operationField("Target", serviceTarget),
       operationField("Operation", serviceAction),
+      operationField("defw_out.log", serviceOutLogLevel),
+      operationField("defw_py.log", servicePyLogLevel),
+      loggingNote,
       operationButtons(widget, "services", async () => {
         const action = serviceAction.value;
         const dangerous = ["stop", "restart"].includes(action);
@@ -1729,6 +1763,10 @@
         await runOperation("services", {
           action: `service-${action}`,
           target: serviceTarget.value,
+          options: ["start", "restart", "recover"].includes(action) ? {
+            defw_log_level: serviceOutLogLevel.value,
+            defw_py_loglevel: servicePyLogLevel.value,
+          } : {},
         });
       }),
       operationOutput("services"),
@@ -1933,6 +1971,14 @@
   }
 
   function submissionEntryIsInFlight(entry) {
+    const entryStatus = String(entry.status || "staged").toLowerCase();
+    if (
+      entryStatus === "staged" &&
+      !entry.active_experiment_id &&
+      !(entry.execution_ids || []).length
+    ) {
+      return false;
+    }
     const experiment = latestSubmissionEntryExperiment(entry);
     const status = String(experiment?.status || entry.status || "").toLowerCase();
     const liveIds = new Set((state.running_experiments || []).map((item) =>
@@ -2378,7 +2424,37 @@
     timeMinutes.min = "1";
     timeMinutes.max = "240";
     timeMinutes.value = String(draft.time_minutes ?? 45);
-    runtimePhase.fields.append(field("Wall time (minutes)", timeMinutes));
+    const defwOutLogLevel = element("select");
+    DEFW_OUT_LOG_LEVELS.forEach(([value, label]) => {
+      const option = element("option", "", label);
+      option.value = value;
+      defwOutLogLevel.append(option);
+    });
+    defwOutLogLevel.value = DEFW_OUT_LOG_LEVELS.some(
+      ([value]) => value === draft.defw_log_level,
+    ) ? draft.defw_log_level : "error";
+    const defwPyLogLevel = element("select");
+    DEFW_PY_LOG_LEVELS.forEach(([value, label]) => {
+      const option = element("option", "", label);
+      option.value = value;
+      defwPyLogLevel.append(option);
+    });
+    defwPyLogLevel.value = DEFW_PY_LOG_LEVELS.some(
+      ([value]) => value === draft.defw_py_loglevel,
+    ) ? draft.defw_py_loglevel : "critical";
+    runtimePhase.fields.append(
+      field("Wall time (minutes)", timeMinutes),
+      field(
+        "defw_out.log",
+        defwOutLogLevel,
+        "Native DEFw log verbosity for this application run.",
+      ),
+      field(
+        "defw_py.log",
+        defwPyLogLevel,
+        "Python DEFw log verbosity for this application run.",
+      ),
+    );
 
     function updateBackendConstraints() {
       timeMinutes.max = backend.value === "iqm" ? "15" : "240";
@@ -2442,6 +2518,8 @@
         allocation_mode: mode.value,
         shots: Number(shots.value),
         time_minutes: Number(timeMinutes.value),
+        defw_log_level: defwOutLogLevel.value,
+        defw_py_loglevel: defwPyLogLevel.value,
         workload_kind: workload.value,
         partition: partition.value.trim(),
         nodes: Number(nodes.value),
@@ -2494,6 +2572,12 @@
       workload.value = payload.workload_kind || "quantum";
       shots.value = String(payload.shots || 16);
       timeMinutes.value = String(payload.time_minutes || 45);
+      defwOutLogLevel.value = DEFW_OUT_LOG_LEVELS.some(
+        ([value]) => value === payload.defw_log_level,
+      ) ? payload.defw_log_level : "error";
+      defwPyLogLevel.value = DEFW_PY_LOG_LEVELS.some(
+        ([value]) => value === payload.defw_py_loglevel,
+      ) ? payload.defw_py_loglevel : "critical";
       partition.value = payload.partition || "normal";
       nodes.value = String(payload.nodes || 1);
       Object.entries(requirements).forEach(([name, input]) => {

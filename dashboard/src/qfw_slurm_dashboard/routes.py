@@ -145,6 +145,7 @@ def _operation(request: RouteRequest) -> JsonResponse:
             str(body.get("target", "cluster")),
             str(body.get("request_id", "")),
             str(body.get("reason", "qfw-dashboard")),
+            body.get("options") if isinstance(body.get("options"), dict) else {},
         )
         return JsonResponse(operation.payload(), status=HTTPStatus.ACCEPTED)
     except Exception as error:

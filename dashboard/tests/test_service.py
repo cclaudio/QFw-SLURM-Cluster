@@ -317,6 +317,13 @@ def test_submission_writes_and_submits_batch_file(tmp_path) -> None:
     assert "--wrap" not in " ".join(argv)
     assert 'cd "${QFW_SHARE_DIR}/examples"' in batch
     assert "#SBATCH --qpu=nwqsim" in batch
+    assert "export DEFW_LOG_LEVEL=error" in batch
+    assert "export DEFW_PY_LOGLEVEL=critical" in batch
+    archive_dir = (
+        "/workspace/home/user-a/qfw-dashboard/experiments/"
+        f"{experiment_id}/defw-logs"
+    )
+    assert f"QFW_EXAMPLE_LOG_ARCHIVE_DIR={archive_dir}" in batch
     assert experiment.manifest["batch_script_path"] == argv[-1]
     assert experiment.artifacts[-1] == argv[-1]
     assert experiment.slurm_job_id == "42"
@@ -470,6 +477,43 @@ def test_submission_forwards_validated_application_parameters(tmp_path) -> None:
     }
 
 
+def test_submission_forwards_logging_levels(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    with patch("qfw_slurm_dashboard.service.threading.Thread", ImmediateThread):
+        with patch.object(dashboard.runner, "cluster") as cluster:
+            cluster.return_value = CommandResult(("sbatch",), 0, "42\n", "")
+            dashboard.submit_experiment({
+                "identity": "user-a",
+                "backend": "nwqsim",
+                "example": "qiskit-simple",
+                "defw_log_level": "debug",
+                "defw_py_loglevel": "debug,DEFW_ALL",
+            })
+    batch = written_batch_script(cluster)
+    assert "export DEFW_LOG_LEVEL=debug" in batch
+    assert "export DEFW_PY_LOGLEVEL=debug,DEFW_ALL" in batch
+
+
+@pytest.mark.parametrize(
+    "logging_options",
+    (
+        {"defw_log_level": "verbose"},
+        {"defw_py_loglevel": "debug;rm"},
+    ),
+)
+def test_submission_rejects_invalid_logging_levels(
+    tmp_path, logging_options
+) -> None:
+    payload = {
+        "identity": "user-a",
+        "backend": "nwqsim",
+        "example": "qiskit-simple",
+        **logging_options,
+    }
+    with pytest.raises(ValueError, match="defw_"):
+        service(tmp_path).submit_experiment(payload)
+
+
 def test_submission_rejects_application_runtime_over_reservation_limit(tmp_path) -> None:
     with pytest.raises(ValueError, match="application qubits"):
         service(tmp_path).submit_experiment({
@@ -546,6 +590,26 @@ def test_individual_qpm_action_runs_on_service_node(tmp_path) -> None:
     assert operation.status == "succeeded"
 
 
+def test_service_action_forwards_logging_levels(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    with patch("qfw_slurm_dashboard.service.threading.Thread", ImmediateThread):
+        with patch.object(dashboard.runner, "stream_host") as host:
+            host.return_value = CommandResult(("docker",), 0, "ready", "")
+            dashboard.submit_action(
+                "service-restart",
+                "root",
+                target="nwqsim",
+                options={
+                    "defw_log_level": "all",
+                    "defw_py_loglevel": "debug,DEFW_ALL",
+                },
+            )
+    command = host.call_args.args[0][-1]
+    assert "QFW_SERVICE_DEFW_LOG_LEVEL=all" in command
+    assert "QFW_SERVICE_DEFW_PY_LOGLEVEL=debug,DEFW_ALL" in command
+    assert "qfw-site-services restart --target nwqsim" in command
+
+
 def test_service_status_returns_concise_health_output(tmp_path) -> None:
     dashboard = service(tmp_path)
     detail = "QFw site services: DOWN\n\nDirectory: DOWN\nNWQSim: STALE\n"
@@ -611,14 +675,20 @@ def test_experiment_archive_contains_manifest_and_all_artifacts(tmp_path) -> Non
     from qfw_slurm_dashboard.models import Experiment
     dashboard = service(tmp_path)
     item = Experiment("result", "user-a", "nwqsim", "qiskit-simple", "normal")
+    item.manifest["output_path"] = (
+        "/workspace/home/user-a/qfw-dashboard/experiments/result/slurm.out"
+    )
     item.artifacts = [
         "/workspace/home/user-a/job.out",
         "/workspace/home/user-a/job.sbatch",
+        "/workspace/home/user-a/qfw-dashboard/experiments/result/"
+        "defw-logs/application/logs/defw_py.log",
     ]
     dashboard.store.save_experiment(item)
     encoded = [
         base64.b64encode(b"application output\n").decode(),
         base64.b64encode(b"#!/bin/bash\n").decode(),
+        base64.b64encode(b"defw app log\n").decode(),
     ]
     with patch.object(dashboard.runner, "cluster") as cluster:
         cluster.side_effect = [
@@ -631,10 +701,14 @@ def test_experiment_archive_contains_manifest_and_all_artifacts(tmp_path) -> Non
             "artifacts/00-job.out",
             "artifacts/01-job.sbatch",
             "experiment.json",
+            "logs/application/logs/defw_py.log",
         ]
         manifest = json.loads(archive.read("experiment.json"))
         assert manifest["experiment_id"] == "result"
         assert archive.read("artifacts/00-job.out") == b"application output\n"
+        assert archive.read("logs/application/logs/defw_py.log") == (
+            b"defw app log\n"
+        )
     assert payload["mime_type"] == "application/zip"
     with pytest.raises(PermissionError):
         dashboard.experiment_archive("result", "user-b")
@@ -659,6 +733,7 @@ def test_service_archive_is_root_only_and_contains_diagnostics(tmp_path) -> None
     archive_data = base64.b64decode(payload["content_base64"])
     with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
         assert "service-status.json" in archive.namelist()
+        assert "logs/defw-out.log" in archive.namelist()
         assert "logs/defw-py.log" in archive.namelist()
         assert "state/service-plane.json" in archive.namelist()
         assert b"secret" not in archive.read("logs/defw-py.log")

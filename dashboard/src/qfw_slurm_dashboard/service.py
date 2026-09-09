@@ -44,6 +44,21 @@ class SubmissionSetValidationError(ValueError):
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 _SAFE_CONSTRAINT = re.compile(r"^[A-Za-z0-9_.+*|&!\[\]-]+$")
 _MEMORY_SIZE = re.compile(r"^[1-9][0-9]*(?:[KMGTP])?$", re.IGNORECASE)
+DEFW_OUT_LOG_LEVELS = {"error", "message", "debug", "all"}
+DEFW_PY_LOG_LEVEL_TOKENS = {
+    "critical",
+    "error",
+    "warning",
+    "info",
+    "debug",
+    "DEFW_APP",
+    "DEFW_SERVICE",
+    "DEFW_RPC",
+    "DEFW_WORKER",
+    "DEFW_CORE",
+    "DEFW_STACKTRACE",
+    "DEFW_ALL",
+}
 EXAMPLE_SCRIPTS = {
     "init-test": "qfw_init_test.sh",
     "qiskit-simple": "qfw_qiskit_simple.sh",
@@ -332,6 +347,7 @@ class DashboardService:
                                 experiment.backend,
                                 reservation_match.group(1),
                             ])
+                self._collect_experiment_log_artifacts(experiment)
                 terminal_success = any(
                     record.get("kind") == "wrapper"
                     and record.get("event") == "finish"
@@ -500,6 +516,7 @@ class DashboardService:
         target: str = "cluster",
         request_id: str = "",
         reason: str = "qfw-dashboard",
+        options: dict[str, Any] | None = None,
     ) -> Operation:
         if identity not in IDENTITIES:
             raise ValueError("unsupported identity")
@@ -516,9 +533,21 @@ class DashboardService:
                 raise ValueError(f"unsupported service operation: {service_operation}")
             if target not in self.SERVICE_TARGETS:
                 raise ValueError(f"unsupported service target: {target}")
-            argv = (
+            command = (
                 "qfw-site-services", service_operation, "--target", target,
             )
+            if service_operation in {"start", "restart", "recover"}:
+                log_env = self._service_log_environment(options or {})
+                argv = (
+                    (
+                        "/usr/bin/env",
+                        *(f"{name}={value}" for name, value in log_env.items()),
+                        *command,
+                    )
+                    if log_env else command
+                )
+            else:
+                argv = command
             container = "slurmctld"
         elif action in {"node-drain", "node-resume"}:
             if identity != "root" or not _SAFE_NAME.fullmatch(target):
@@ -894,6 +923,12 @@ class DashboardService:
             "account": self._optional_name(request, "account"),
             "qos": self._optional_name(request, "qos"),
             "time_minutes": time_minutes,
+            "defw_log_level": self._defw_log_level(
+                request.get("defw_log_level", "error")
+            ),
+            "defw_py_loglevel": self._defw_py_loglevel(
+                request.get("defw_py_loglevel", "critical")
+            ),
             "application_source": application_source,
             "application_path": application_path,
             "application_parameters": application_parameters,
@@ -926,6 +961,35 @@ class DashboardService:
         if value and not _SAFE_NAME.fullmatch(value):
             raise ValueError(f"invalid {name}")
         return value
+
+    @staticmethod
+    def _defw_log_level(value: Any) -> str:
+        level = str(value).strip()
+        if level not in DEFW_OUT_LOG_LEVELS:
+            raise ValueError("invalid defw_out.log level")
+        return level
+
+    @staticmethod
+    def _defw_py_loglevel(value: Any) -> str:
+        tokens = [token.strip() for token in str(value).split(",")]
+        invalid_tokens = [
+            token for token in tokens if token not in DEFW_PY_LOG_LEVEL_TOKENS
+        ]
+        if not tokens or invalid_tokens:
+            raise ValueError("invalid defw_py.log level")
+        return ",".join(tokens)
+
+    def _service_log_environment(self, options: dict[str, Any]) -> dict[str, str]:
+        environment: dict[str, str] = {}
+        if "defw_log_level" in options:
+            environment["QFW_SERVICE_DEFW_LOG_LEVEL"] = self._defw_log_level(
+                options["defw_log_level"]
+            )
+        if "defw_py_loglevel" in options:
+            environment["QFW_SERVICE_DEFW_PY_LOGLEVEL"] = self._defw_py_loglevel(
+                options["defw_py_loglevel"]
+            )
+        return environment
 
     @staticmethod
     def _experiment_id(request: dict[str, Any]) -> str:
@@ -1219,7 +1283,13 @@ class DashboardService:
             "set -euo pipefail",
             "export QFW_SHARED_ROOT=/workspace/qfw-container-base",
             'export QFW_RUN_BASE_DIR="${HOME}/qfw-runs"',
+            f"export DEFW_LOG_LEVEL={shlex.quote(requirements['defw_log_level'])}",
+            "export DEFW_PY_LOGLEVEL="
+            f"{shlex.quote(requirements['defw_py_loglevel'])}",
+            "export QFW_EXAMPLE_LOG_ARCHIVE_DIR="
+            f"{shlex.quote(str(Path(output_path).parent / 'defw-logs'))}",
             'mkdir -p "${QFW_RUN_BASE_DIR}"',
+            'mkdir -p "${QFW_EXAMPLE_LOG_ARCHIVE_DIR}"',
             "source /opt/openqse/qfw/bin/qfw-activate \\",
             "    --venv /opt/openqse/qfw-venv",
             "qfw_dashboard_deactivate() {",
@@ -1465,7 +1535,7 @@ class DashboardService:
                 except RuntimeError as error:
                     missing.append(f"{path}: {error}")
                     continue
-                name = f"artifacts/{index:02d}-{Path(path).name}"
+                name = self._archive_artifact_name(experiment, index, path)
                 archive.writestr(name, data)
             if missing:
                 archive.writestr("missing-artifacts.txt", "\n".join(missing) + "\n")
@@ -1536,6 +1606,43 @@ class DashboardService:
 
     def _read_artifact(self, owner: str, path: str) -> bytes:
         return self._read_cluster_file(owner, "slurmctld", path)
+
+    @staticmethod
+    def _experiment_log_archive_root(experiment: Any) -> str:
+        manifest = (
+            experiment.manifest if isinstance(experiment, Experiment)
+            else experiment.get("manifest", {})
+        )
+        output_path = str(manifest.get("output_path", ""))
+        if not output_path:
+            return ""
+        return str(Path(output_path).parent / "defw-logs")
+
+    def _collect_experiment_log_artifacts(self, experiment: Experiment) -> None:
+        root = self._experiment_log_archive_root(experiment)
+        prefix = f"/workspace/home/{experiment.identity}/"
+        if not root.startswith(prefix):
+            return
+        result = self.runner.cluster(
+            experiment.identity,
+            ("find", root, "-maxdepth", "8", "-type", "f"),
+            timeout=15,
+        )
+        if result.returncode:
+            return
+        for path in sorted(line.strip() for line in result.stdout.splitlines()):
+            if path.startswith(prefix) and path not in experiment.artifacts:
+                experiment.artifacts.append(path)
+
+    def _archive_artifact_name(
+        self, experiment: dict[str, Any], index: int, path: str
+    ) -> str:
+        log_root = self._experiment_log_archive_root(experiment).rstrip("/")
+        if log_root and path.startswith(f"{log_root}/"):
+            relative = path[len(log_root) + 1:]
+            if relative and ".." not in Path(relative).parts:
+                return f"logs/{relative}"
+        return f"artifacts/{index:02d}-{Path(path).name}"
 
     def _read_cluster_file(self, identity: str, container: str, path: str) -> bytes:
         reader = (

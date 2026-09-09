@@ -72,6 +72,9 @@ SERVICE_DIAGNOSTICS = {
         DiagnosticFile("logs/defw-py.log", "slurmctld",
                        "/var/lib/qfw-site-services/directory/services/"
                        "qfw-site-dirsvc/logs/defw_py.log"),
+        DiagnosticFile("logs/defw-out.log", "slurmctld",
+                       "/var/lib/qfw-site-services/directory/services/"
+                       "qfw-site-dirsvc/logs/defw_out.log"),
         DiagnosticFile("logs/stdout.log", "slurmctld",
                        "/var/lib/qfw-site-services/directory/services/"
                        "qfw-site-dirsvc/logs/qfw-site-dirsvc.stdout.log"),
@@ -93,6 +96,9 @@ SERVICE_DIAGNOSTICS = {
         DiagnosticFile("logs/defw-py.log", "nwqsim-head",
                        "/var/lib/qfw-site-services/qpm/nwqsim/services/"
                        "nwqsim/logs/defw_py.log"),
+        DiagnosticFile("logs/defw-out.log", "nwqsim-head",
+                       "/var/lib/qfw-site-services/qpm/nwqsim/services/"
+                       "nwqsim/logs/defw_out.log"),
         DiagnosticFile("logs/stdout.log", "nwqsim-head",
                        "/var/lib/qfw-site-services/qpm/nwqsim/services/"
                        "nwqsim/logs/nwqsim.stdout.log"),
@@ -120,6 +126,9 @@ SERVICE_DIAGNOSTICS = {
         DiagnosticFile("logs/defw-py.log", "iqm-head",
                        "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
                        "iqm-ornl-20q/logs/defw_py.log"),
+        DiagnosticFile("logs/defw-out.log", "iqm-head",
+                       "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
+                       "iqm-ornl-20q/logs/defw_out.log"),
         DiagnosticFile("logs/stdout.log", "iqm-head",
                        "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
                        "iqm-ornl-20q/logs/iqm-ornl-20q.stdout.log"),

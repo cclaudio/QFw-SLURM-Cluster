@@ -1022,6 +1022,13 @@
 .qfw-operation-field input,
 .qfw-operation-field select { width: 100%; }
 
+.qfw-operation-help {
+  color: var(--qfw-muted);
+  font-size: 0.78em;
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .qfw-operation-buttons {
   align-items: center;
   display: flex;
