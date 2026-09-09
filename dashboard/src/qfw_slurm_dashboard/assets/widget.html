@@ -58,6 +58,13 @@
       min-width: 3.5rem;
       text-align: center;
     }
+    .qfw-widget-zoom {
+      accent-color: var(--cyan);
+      cursor: pointer;
+      min-height: 1.5rem;
+      padding: 0;
+      width: 10rem;
+    }
     .qfw-widget-viewport {
       background-color: var(--bg);
       background-image: linear-gradient(rgb(94 232 255 / 4%) 1px, transparent 1px),
@@ -106,9 +113,9 @@
   <div class="qfw-widget-toolbar">
     <label>Filter <input id="filter" type="search"></label>
     <span class="qfw-camera-hint">Wheel zoom · middle-drag pan</span>
-    <button id="zoomOut" type="button">−</button>
+    <input id="zoomSlider" class="qfw-widget-zoom" type="range"
+      min="25" max="250" step="5" value="100" aria-label="Zoom">
     <output id="zoomLabel" class="qfw-widget-zoom-label">100%</output>
-    <button id="zoomIn" type="button">+</button>
     <button id="resetView" type="button">Reset view</button>
   </div>
   <main id="viewport" class="qfw-widget-viewport" aria-label="Zoomable widget canvas">
@@ -126,10 +133,11 @@
     const viewport = document.getElementById("viewport");
     const filter = document.getElementById("filter");
     const collapse = document.getElementById("collapse");
-    const zoomOut = document.getElementById("zoomOut");
-    const zoomIn = document.getElementById("zoomIn");
+    const zoomSlider = document.getElementById("zoomSlider");
     const resetView = document.getElementById("resetView");
     const zoomLabel = document.getElementById("zoomLabel");
+    const CANVAS_ZOOM_MIN = 25;
+    const CANVAS_ZOOM_MAX = 250;
     const controlWidgets = new Set([
       "cluster-control", "service-control", "node-control", "cluster-access",
     ]);
@@ -155,7 +163,9 @@
       output.style.left = `${camera.x / camera.scale}px`;
       output.style.top = `${camera.y / camera.scale}px`;
       output.style.zoom = String(camera.scale);
-      zoomLabel.textContent = `${Math.round(camera.scale * 100)}%`;
+      const percent = Math.round(camera.scale * 100);
+      zoomLabel.textContent = `${percent}%`;
+      zoomSlider.value = String(percent);
     }
 
     function persistCamera() {
@@ -223,7 +233,10 @@
       const localX = clientX - bounds.left;
       const localY = clientY - bounds.top;
       const previous = camera.scale;
-      const next = Math.min(2.25, Math.max(0.35, previous * factor));
+      const next = Math.min(
+        CANVAS_ZOOM_MAX / 100,
+        Math.max(CANVAS_ZOOM_MIN / 100, previous * factor),
+      );
       const worldX = (localX - camera.x) / previous;
       const worldY = (localY - camera.y) / previous;
       camera = {
@@ -233,6 +246,12 @@
       };
       applyCamera();
       persistCamera();
+    }
+
+    function setZoomAt(clientX, clientY, percent) {
+      const next = Number(percent) / 100;
+      if (!Number.isFinite(next) || next <= 0) return;
+      zoomAt(clientX, clientY, next / camera.scale);
     }
 
     function scrollableWheelTarget(event, boundary) {
@@ -281,13 +300,13 @@
     viewport.addEventListener("auxclick", (event) => {
       if (event.button === 1) event.preventDefault();
     });
-    zoomOut.addEventListener("click", () => {
+    zoomSlider.addEventListener("input", () => {
       const bounds = viewport.getBoundingClientRect();
-      zoomAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, 0.85);
-    });
-    zoomIn.addEventListener("click", () => {
-      const bounds = viewport.getBoundingClientRect();
-      zoomAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, 1 / 0.85);
+      setZoomAt(
+        bounds.left + bounds.width / 2,
+        bounds.top + bounds.height / 2,
+        Number(zoomSlider.value),
+      );
     });
     resetView.addEventListener("click", () => {
       camera = { x: 24, y: 24, scale: 1 };
@@ -297,8 +316,10 @@
         container.scrollTop = 0;
       });
       const topologyZoom = output.querySelector(".qfw-topology-zoom");
+      const topologyZoomValue = output.querySelector(".qfw-topology-zoom-value");
       const topologyGraph = output.querySelector(".qfw-topology-graph");
       if (topologyZoom) topologyZoom.value = "100";
+      if (topologyZoomValue) topologyZoomValue.textContent = "100%";
       if (topologyGraph) topologyGraph.style.width = "100%";
       applyCamera();
       publishPresentation({
@@ -312,6 +333,7 @@
         const projection = output.querySelector(".qfw-topology-projection");
         const topologyFilter = output.querySelector(".qfw-topology-filter");
         const zoom = output.querySelector(".qfw-topology-zoom");
+        const zoomValue = output.querySelector(".qfw-topology-zoom-value");
         const graph = output.querySelector(".qfw-topology-graph");
         projection?.addEventListener("change", () => {
           publishPresentation({ projection: projection.value });
@@ -321,6 +343,7 @@
         });
         zoom?.addEventListener("input", () => {
           if (graph) graph.style.width = `${zoom.value}%`;
+          if (zoomValue) zoomValue.textContent = `${zoom.value}%`;
         });
         zoom?.addEventListener("change", () => {
           publishPresentation({ zoom: Number(zoom.value) });
@@ -498,7 +521,10 @@
         camera = {
           x: Number(savedCamera.x) || 0,
           y: Number(savedCamera.y) || 0,
-          scale: Math.min(2.25, Math.max(0.35, Number(savedCamera.scale) || 1)),
+          scale: Math.min(
+            CANVAS_ZOOM_MAX / 100,
+            Math.max(CANVAS_ZOOM_MIN / 100, Number(savedCamera.scale) || 1),
+          ),
         };
         applyCamera();
       }

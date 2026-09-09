@@ -264,6 +264,14 @@
   text-align: center;
 }
 
+.qfw-canvas-zoom {
+  accent-color: var(--qfw-cyan);
+  cursor: pointer;
+  min-height: 1.5em !important;
+  padding: 0 !important;
+  width: 10em;
+}
+
 .qfw-dashboard-clear {
   border-color: rgb(255 102 143 / 64%) !important;
 }
@@ -503,6 +511,13 @@
   min-height: 1.5em !important;
   padding: 0 !important;
   width: 10em;
+}
+
+.qfw-topology-zoom-value {
+  color: var(--qfw-muted);
+  font-size: 0.75em;
+  min-width: 3.5em;
+  text-align: center;
 }
 
 .qfw-topology-loading {

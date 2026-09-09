@@ -56,6 +56,12 @@
     "#32d6c5", "#75d982", "#54b8ff", "#8fa3ff", "#c893ff",
     "#ef8fd2", "#e6dc68", "#68d8f0", "#a8dc72", "#d4a5ff",
   ];
+  const CANVAS_ZOOM_MIN = 25;
+  const CANVAS_ZOOM_MAX = 250;
+  const CANVAS_ZOOM_STEP = 5;
+  const TOPOLOGY_ZOOM_MIN = 50;
+  const TOPOLOGY_ZOOM_MAX = 200;
+  const TOPOLOGY_ZOOM_STEP = 10;
   const ACTIVE_EXPERIMENT_STATES = new Set([
     "created", "submitting", "submitted", "pending",
     "configuring", "running", "completing", "cancel-requested",
@@ -800,16 +806,25 @@
     filter.setAttribute("value", filter.value);
     const zoom = element("input");
     zoom.className = "qfw-topology-zoom";
-    zoom.type = "number";
-    zoom.step = "10";
-    zoom.value = String(widgetStates.topology?.zoom || 100);
+    zoom.type = "range";
+    zoom.min = String(TOPOLOGY_ZOOM_MIN);
+    zoom.max = String(TOPOLOGY_ZOOM_MAX);
+    zoom.step = String(TOPOLOGY_ZOOM_STEP);
+    const savedTopologyZoom = Number(widgetStates.topology?.zoom || 100);
+    const safeTopologyZoom = Number.isFinite(savedTopologyZoom)
+      ? savedTopologyZoom : 100;
+    zoom.value = String(Math.min(
+      TOPOLOGY_ZOOM_MAX,
+      Math.max(TOPOLOGY_ZOOM_MIN, safeTopologyZoom),
+    ));
     zoom.setAttribute("value", zoom.value);
+    const zoomValue = element("output", "qfw-topology-zoom-value", `${zoom.value}%`);
     const projectionLabel = element("label", "qfw-control-group", "Projection ");
     projectionLabel.append(projection);
     const filterLabel = element("label", "qfw-control-group", "Filter ");
     filterLabel.append(filter);
     const zoomControlLabel = element("label", "qfw-control-group", "Zoom ");
-    zoomControlLabel.append(zoom);
+    zoomControlLabel.append(zoom, zoomValue);
     controls.append(projectionLabel, filterLabel, zoomControlLabel);
     const hover = element("div", "qfw-topology-hover");
     hover.hidden = true;
@@ -1271,6 +1286,7 @@
       if (!Number.isFinite(Number(zoom.value)) || Number(zoom.value) <= 0) return;
       widgetStates.topology = { ...widgetStates.topology, zoom: Number(zoom.value) };
       svg.style.width = `${zoom.value}%`;
+      zoomValue.textContent = `${zoom.value}%`;
       savePresentation();
       publishWidgets();
     });
@@ -1434,10 +1450,15 @@
   function canvasCamera() {
     const saved = widgetStates.canvas || {};
     const savedScale = Number(saved.scale);
+    const safeScale = Number.isFinite(savedScale) && savedScale > 0
+      ? savedScale : 1;
     return {
       x: Number.isFinite(Number(saved.x)) ? Number(saved.x) : 32,
       y: Number.isFinite(Number(saved.y)) ? Number(saved.y) : 32,
-      scale: Number.isFinite(savedScale) && savedScale > 0 ? savedScale : 1,
+      scale: Math.min(
+        CANVAS_ZOOM_MAX / 100,
+        Math.max(CANVAS_ZOOM_MIN / 100, safeScale),
+      ),
     };
   }
 
@@ -1461,7 +1482,7 @@
     });
   }
 
-  function installCanvasInteraction(viewport, stage, zoomLabel) {
+  function installCanvasInteraction(viewport, stage, zoomLabel, zoomSlider = null) {
     const camera = canvasCamera();
     let pan = null;
 
@@ -1469,7 +1490,9 @@
       stage.style.left = `${camera.x / camera.scale}px`;
       stage.style.top = `${camera.y / camera.scale}px`;
       stage.style.zoom = String(camera.scale);
-      zoomLabel.textContent = `${Math.round(camera.scale * 100)}%`;
+      const percent = Math.round(camera.scale * 100);
+      zoomLabel.textContent = `${percent}%`;
+      if (zoomSlider) zoomSlider.value = String(percent);
     }
 
     function zoomAt(clientX, clientY, factor) {
@@ -1477,7 +1500,11 @@
       const localX = clientX - bounds.left;
       const localY = clientY - bounds.top;
       const previous = camera.scale;
-      const next = previous * factor;
+      const requested = previous * factor;
+      const next = Math.min(
+        CANVAS_ZOOM_MAX / 100,
+        Math.max(CANVAS_ZOOM_MIN / 100, requested),
+      );
       if (!Number.isFinite(next) || next <= 0) return;
       const worldX = (localX - camera.x) / previous;
       const worldY = (localY - camera.y) / previous;
@@ -1486,6 +1513,12 @@
       camera.y = localY - worldY * next;
       apply();
       saveCanvasCamera(camera);
+    }
+
+    function setZoomAt(clientX, clientY, percent) {
+      const next = Number(percent) / 100;
+      if (!Number.isFinite(next) || next <= 0) return;
+      zoomAt(clientX, clientY, next / camera.scale);
     }
 
     viewport.addEventListener("wheel", (event) => {
@@ -1539,6 +1572,10 @@
       zoom(factor) {
         const bounds = viewport.getBoundingClientRect();
         zoomAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, factor);
+      },
+      setZoom(percent) {
+        const bounds = viewport.getBoundingClientRect();
+        setZoomAt(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2, percent);
       },
     };
   }
@@ -3019,8 +3056,10 @@
       container.scrollTop = 0;
     });
     const topologyZoom = root.querySelector(".qfw-topology-zoom");
+    const topologyZoomValue = root.querySelector(".qfw-topology-zoom-value");
     const topologyGraph = root.querySelector(".qfw-topology-graph");
     if (topologyZoom) topologyZoom.value = "100";
+    if (topologyZoomValue) topologyZoomValue.textContent = "100%";
     if (topologyGraph) topologyGraph.style.width = "100%";
     widgetStates.topology = { ...widgetStates.topology, zoom: 100 };
     savePresentation();
@@ -3054,9 +3093,14 @@
     const identityLabel = element("label", "qfw-identity-label", "Cluster identity ");
     identityLabel.append(identity);
     const viewControls = element("div", "qfw-view-controls");
-    const zoomOut = element("button", "", "−");
+    const zoomSlider = element("input", "qfw-canvas-zoom");
+    zoomSlider.type = "range";
+    zoomSlider.min = String(CANVAS_ZOOM_MIN);
+    zoomSlider.max = String(CANVAS_ZOOM_MAX);
+    zoomSlider.step = String(CANVAS_ZOOM_STEP);
+    zoomSlider.value = "100";
+    zoomSlider.setAttribute("aria-label", "Zoom");
     const zoomLabel = element("output", "qfw-zoom-label", "100%");
-    const zoomIn = element("button", "", "+");
     const reset = element("button", "", "Reset view");
     const clear = element("button", "qfw-dashboard-clear danger", "Clear state");
     const clearStatus = element("output", "qfw-dashboard-clear-status");
@@ -3067,10 +3111,10 @@
     clear.disabled = activeIdentity !== "root" || dashboardResetStatus === "running";
     clear.classList.toggle("is-pressed", dashboardResetStatus === "running");
     clear.setAttribute("aria-pressed", String(dashboardResetStatus === "running"));
-    [zoomOut, zoomIn, reset, clear].forEach((button) => { button.type = "button"; });
+    [reset, clear].forEach((button) => { button.type = "button"; });
     viewControls.append(
       element("span", "qfw-canvas-hint", "Wheel zoom · middle-drag pan"),
-      zoomOut, zoomLabel, zoomIn, reset, clear, clearStatus,
+      zoomSlider, zoomLabel, reset, clear, clearStatus,
     );
     header.append(viewControls, identityLabel);
     root.append(header);
@@ -3082,9 +3126,8 @@
     stage.append(sections);
     viewport.append(stage);
     root.append(viewport);
-    const camera = installCanvasInteraction(viewport, stage, zoomLabel);
-    zoomOut.addEventListener("click", () => camera.zoom(0.85));
-    zoomIn.addEventListener("click", () => camera.zoom(1 / 0.85));
+    const camera = installCanvasInteraction(viewport, stage, zoomLabel, zoomSlider);
+    zoomSlider.addEventListener("input", () => camera.setZoom(Number(zoomSlider.value)));
     reset.addEventListener("click", () => {
       camera.reset();
       resetDashboardGeometry(root);
