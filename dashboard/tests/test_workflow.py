@@ -280,6 +280,9 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert 'zoom?.addEventListener("change"' in popout
     assert 'class="qfw-widget-viewport"' in popout
     assert "function zoomAt(" in popout
+    assert 'min="5" max="1000"' in popout
+    assert "const CANVAS_ZOOM_MIN = 5;" in popout
+    assert "const CANVAS_ZOOM_MAX = 1000;" in popout
     assert "function scrollableWheelTarget(event, boundary)" in popout
     assert "if (scrollableWheelTarget(event, viewport)) return;" in popout
     assert "popout_camera" in popout
@@ -288,6 +291,9 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "output.style.transform" not in popout
     assert "function captureMirrorScrollPositions()" in popout
     assert "restoreMirrorScrollPositions(scrollPositions)" in popout
+    assert "function hydrateSortableTables()" in popout
+    assert 'table.querySelectorAll("thead .qfw-table-sort")' in popout
+    assert "compareSortableValues(" in popout
     assert 'output.querySelectorAll("[data-qfw-preserve-scroll]")' in popout
     assert "height: container.style.height" in popout
     assert "containers[index].style.height = position.height" in popout

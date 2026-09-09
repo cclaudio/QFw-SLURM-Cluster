@@ -114,7 +114,7 @@
     <label>Filter <input id="filter" type="search"></label>
     <span class="qfw-camera-hint">Wheel zoom · middle-drag pan</span>
     <input id="zoomSlider" class="qfw-widget-zoom" type="range"
-      min="25" max="250" step="5" value="100" aria-label="Zoom">
+      min="5" max="1000" step="5" value="100" aria-label="Zoom">
     <output id="zoomLabel" class="qfw-widget-zoom-label">100%</output>
     <button id="resetView" type="button">Reset view</button>
   </div>
@@ -136,8 +136,8 @@
     const zoomSlider = document.getElementById("zoomSlider");
     const resetView = document.getElementById("resetView");
     const zoomLabel = document.getElementById("zoomLabel");
-    const CANVAS_ZOOM_MIN = 25;
-    const CANVAS_ZOOM_MAX = 250;
+    const CANVAS_ZOOM_MIN = 5;
+    const CANVAS_ZOOM_MAX = 1000;
     const controlWidgets = new Set([
       "cluster-control", "service-control", "node-control", "cluster-access",
     ]);
@@ -252,6 +252,63 @@
       const next = Number(percent) / 100;
       if (!Number.isFinite(next) || next <= 0) return;
       zoomAt(clientX, clientY, next / camera.scale);
+    }
+
+    function sortableValue(value) {
+      const text = String(value ?? "").trim();
+      if (!text || text === "—") return { type: "empty", value: "" };
+      const numberText = text.replace(/,/g, "");
+      const number = Number(numberText);
+      if (/^-?\d+(?:\.\d+)?$/.test(numberText)) {
+        return { type: "number", value: number };
+      }
+      const timestamp = Date.parse(text);
+      if (Number.isFinite(timestamp) && /\d{4}-\d{2}-\d{2}/.test(text)) {
+        return { type: "date", value: timestamp };
+      }
+      return { type: "string", value: text.toLowerCase() };
+    }
+
+    function compareSortableValues(left, right) {
+      const leftValue = sortableValue(left);
+      const rightValue = sortableValue(right);
+      if (leftValue.type === "empty" && rightValue.type !== "empty") return 1;
+      if (rightValue.type === "empty" && leftValue.type !== "empty") return -1;
+      if (leftValue.type === rightValue.type
+          && ["date", "number"].includes(leftValue.type)) {
+        return leftValue.value - rightValue.value;
+      }
+      return String(leftValue.value).localeCompare(String(rightValue.value), undefined, {
+        numeric: true,
+      });
+    }
+
+    function hydrateSortableTables() {
+      output.querySelectorAll("table.qfw-table").forEach((table) => {
+        table.querySelectorAll("thead .qfw-table-sort").forEach((button) => {
+          button.addEventListener("click", () => {
+            const heading = button.closest("th");
+            const header = heading?.parentElement;
+            const body = table.tBodies[0];
+            if (!heading || !header || !body) return;
+            const column = [...header.children].indexOf(heading);
+            const direction = table.dataset.qfwSortColumn === String(column)
+              && table.dataset.qfwSortDirection !== "desc" ? "desc" : "asc";
+            table.dataset.qfwSortColumn = String(column);
+            table.dataset.qfwSortDirection = direction;
+            const multiplier = direction === "desc" ? -1 : 1;
+            const rows = [...body.rows].filter((row) =>
+              row.cells.length > column && !row.querySelector(".qfw-empty"));
+            rows.sort((left, right) => (
+              compareSortableValues(
+                left.cells[column]?.textContent || "",
+                right.cells[column]?.textContent || "",
+              ) * multiplier
+            ));
+            body.replaceChildren(...rows);
+          });
+        });
+      });
     }
 
     function scrollableWheelTarget(event, boundary) {
@@ -470,6 +527,7 @@
       const template = document.createElement("template");
       template.innerHTML = lastMarkup;
       output.replaceChildren(template.content.cloneNode(true));
+      hydrateSortableTables();
       hydrateWidget();
       restoreMirrorScrollPositions(scrollPositions);
     }

@@ -56,11 +56,11 @@
     "#32d6c5", "#75d982", "#54b8ff", "#8fa3ff", "#c893ff",
     "#ef8fd2", "#e6dc68", "#68d8f0", "#a8dc72", "#d4a5ff",
   ];
-  const CANVAS_ZOOM_MIN = 25;
-  const CANVAS_ZOOM_MAX = 250;
+  const CANVAS_ZOOM_MIN = 5;
+  const CANVAS_ZOOM_MAX = 1000;
   const CANVAS_ZOOM_STEP = 5;
-  const TOPOLOGY_ZOOM_MIN = 50;
-  const TOPOLOGY_ZOOM_MAX = 200;
+  const TOPOLOGY_ZOOM_MIN = 10;
+  const TOPOLOGY_ZOOM_MAX = 1000;
   const TOPOLOGY_ZOOM_STEP = 10;
   const ACTIVE_EXPERIMENT_STATES = new Set([
     "created", "submitting", "submitted", "pending",
@@ -523,6 +523,34 @@
       || "unknown";
   }
 
+  function sortableValue(value) {
+    const text = String(value ?? "").trim();
+    if (!text || text === "—") return { type: "empty", value: "" };
+    const number = Number(text.replace(/,/g, ""));
+    if (/^-?\d+(?:\.\d+)?$/.test(text.replace(/,/g, ""))) {
+      return { type: "number", value: number };
+    }
+    const timestamp = Date.parse(text);
+    if (Number.isFinite(timestamp) && /\d{4}-\d{2}-\d{2}/.test(text)) {
+      return { type: "date", value: timestamp };
+    }
+    return { type: "string", value: text.toLowerCase() };
+  }
+
+  function compareSortableValues(left, right) {
+    const leftValue = sortableValue(left);
+    const rightValue = sortableValue(right);
+    if (leftValue.type === "empty" && rightValue.type !== "empty") return 1;
+    if (rightValue.type === "empty" && leftValue.type !== "empty") return -1;
+    if (leftValue.type === rightValue.type
+        && ["date", "number"].includes(leftValue.type)) {
+      return leftValue.value - rightValue.value;
+    }
+    return String(leftValue.value).localeCompare(String(rightValue.value), undefined, {
+      numeric: true,
+    });
+  }
+
   function table(records, columns) {
     const wrapper = preserveScroll(element("div", "qfw-table-wrap"));
     const value = element("table", "qfw-table");
@@ -534,8 +562,8 @@
       const sort = element("button", "qfw-table-sort", label);
       sort.type = "button";
       sort.addEventListener("click", () => {
-        sortedRecords.sort((left, right) => String(left[key] ?? "")
-          .localeCompare(String(right[key] ?? ""), undefined, { numeric: true }));
+        sortedRecords.sort((left, right) =>
+          compareSortableValues(left[key], right[key]));
         renderRows();
       });
       heading.append(sort);
@@ -667,10 +695,8 @@
     let sortKey = results ? "modified_at" : "";
     let sortDirection = results ? -1 : 1;
     let sortedRecords = [...records];
-    const compare = (left, right, key) => String(display(left, key) ?? "")
-      .localeCompare(String(display(right, key) ?? ""), undefined, {
-        numeric: true,
-      }) * sortDirection;
+    const compare = (left, right, key) =>
+      compareSortableValues(display(left, key), display(right, key)) * sortDirection;
     const body = element("tbody");
     function sortRecords() {
       sortedRecords = [...records];
