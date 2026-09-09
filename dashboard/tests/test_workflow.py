@@ -202,6 +202,8 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert "function renderClusterControl()" in frontend
     assert '"Clear Dashboard state"' in frontend
     assert '"/api/qfw-dashboard/reset"' in frontend
+    assert '"Clear experiment results"' in frontend
+    assert '"/api/qfw-dashboard/experiments/clear"' in frontend
     assert "window.localStorage.removeItem(storageKey())" in frontend
     assert 'widgetChannel?.postMessage({ type: "reset" })' in frontend
     assert "dashboardResetGeneration" in frontend

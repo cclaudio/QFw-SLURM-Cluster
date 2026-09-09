@@ -509,6 +509,81 @@ class DashboardService:
             "cleared": cleared,
         }
 
+    def clear_experiment_results(self, identity: str) -> dict[str, Any]:
+        """Remove historical experiment records while preserving active work."""
+        if identity not in IDENTITIES:
+            raise ValueError("unsupported identity")
+
+        with self._lifecycle_lock:
+            experiments = self.store.experiments()
+            active_threads = {
+                identifier for identifier, thread in self._threads.items()
+                if getattr(thread, "is_alive", lambda: False)()
+            }
+            tracked_job_ids = {
+                str(item.get("slurm_job_id", "")).split(";", 1)[0].split("+", 1)[0]
+                for item in experiments
+                if item.get("slurm_job_id")
+            }
+            active_job_ids: set[str] = set()
+            if tracked_job_ids:
+                result = self.runner.cluster(
+                    "root", ("squeue", "--noheader", "--format=%A")
+                )
+                if result.returncode:
+                    detail = result.stderr.strip() or result.stdout.strip()
+                    raise RuntimeError(
+                        "cannot verify whether tracked Slurm jobs are active"
+                        + (f": {detail}" if detail else "")
+                    )
+                active_job_ids = {
+                    line.strip().split("+", 1)[0]
+                    for line in result.stdout.splitlines()
+                    if line.strip()
+                }
+            active_experiments = {
+                str(item.get("experiment_id", ""))
+                for item in experiments
+                if (
+                    str(item.get("experiment_id", "")) in active_threads
+                    or (
+                        bool(item.get("slurm_job_id"))
+                        and str(item["slurm_job_id"]).split(";", 1)[0]
+                        .split("+", 1)[0] in active_job_ids
+                    )
+                )
+            }
+            removable = {
+                str(item.get("experiment_id", ""))
+                for item in experiments
+                if (
+                    item.get("experiment_id")
+                    and str(item.get("experiment_id", "")) not in active_experiments
+                    and (
+                        identity == "root"
+                        or str(item.get("identity", "")) == identity
+                    )
+                )
+            }
+            removed = self.store.delete_experiments(removable)
+            with self._state_lock:
+                self._state_cache = None
+                self._state_cached_at = 0.0
+        self.store.audit({
+            "identity": identity,
+            "host_identity": "electroboy-service",
+            "action": "experiment-results-clear",
+            "target": "experiments",
+            "outcome": "success",
+            "cleared": removed,
+        })
+        return {
+            "schema": "qfw-dashboard-experiment-results-clear-v1",
+            "outcome": "success",
+            "timestamp": utc_now(),
+            "cleared": {"experiments": removed},
+        }
+
     def submit_action(
         self,
         action: str,

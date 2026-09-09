@@ -69,3 +69,17 @@ def test_clear_dashboard_state_removes_only_dashboard_history(tmp_path) -> None:
     assert store.experiments() == []
     assert store.events() == {"events": [], "cursor": 0, "gap": False}
     assert unrelated.read_text() == "retained\n"
+
+
+def test_delete_experiments_removes_selected_records_only(tmp_path) -> None:
+    store = DashboardStore(tmp_path)
+    store.save_experiment(
+        Experiment("old", "user-a", "nwqsim", "qiskit-simple", "normal")
+    )
+    store.save_experiment(
+        Experiment("keep", "user-a", "nwqsim", "qiskit-simple", "normal")
+    )
+
+    assert store.delete_experiments({"old"}) == 1
+
+    assert [item["experiment_id"] for item in store.experiments()] == ["keep"]

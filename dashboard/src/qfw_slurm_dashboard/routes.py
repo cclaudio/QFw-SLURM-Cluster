@@ -174,6 +174,16 @@ def _reset(request: RouteRequest) -> JsonResponse:
         return _error(error)
 
 
+def _clear_experiment_results(request: RouteRequest) -> JsonResponse:
+    try:
+        body = request.body()
+        return JsonResponse(_service(request).clear_experiment_results(
+            str(body.get("identity", ""))
+        ))
+    except Exception as error:
+        return _error(error)
+
+
 def _preview(request: RouteRequest) -> JsonResponse:
     try:
         preview = _service(request).preview_experiment(request.body())
@@ -291,6 +301,10 @@ ROUTES = (
     route("POST", "/api/qfw-dashboard/operations", "operation"),
     route("POST", "/api/qfw-dashboard/operations/abort", "abort-operation"),
     route("POST", "/api/qfw-dashboard/reset", "reset"),
+    route(
+        "POST", "/api/qfw-dashboard/experiments/clear",
+        "clear-experiment-results",
+    ),
     route("POST", "/api/qfw-dashboard/preview", "preview"),
     route("POST", "/api/qfw-dashboard/experiments", "experiment"),
     route(
@@ -313,6 +327,7 @@ HANDLERS: dict[str, Any] = {
     "operation": _operation,
     "abort-operation": _abort_operation,
     "reset": _reset,
+    "clear-experiment-results": _clear_experiment_results,
     "preview": _preview,
     "experiment": _experiment,
     "experiment-batch": _experiment_batch,

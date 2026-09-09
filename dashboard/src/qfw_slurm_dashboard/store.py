@@ -112,3 +112,20 @@ class DashboardStore:
                     counts["events"] = sum(1 for _ in stream)
                 events.unlink()
             return counts
+
+    def delete_experiments(self, experiment_ids: set[str]) -> int:
+        """Remove selected experiment records without touching artifacts."""
+        with self._lock:
+            directory = self.root / "experiments"
+            if not directory.exists() or not experiment_ids:
+                return 0
+            removed = 0
+            for item in directory.glob("*.json"):
+                try:
+                    value = json.loads(item.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if str(value.get("experiment_id", "")) in experiment_ids:
+                    item.unlink(missing_ok=True)
+                    removed += 1
+            return removed

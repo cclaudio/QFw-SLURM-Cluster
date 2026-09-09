@@ -116,6 +116,7 @@
   let selectedExperimentPhase = null;
   let dashboardResetGeneration = 0;
   let dashboardResetStatus = "idle";
+  let experimentResultsClearStatus = "idle";
   const nonPrimarySelectionPointers = new Set();
   const activeScrollPointers = new Map();
   const popupWindows = new Map();
@@ -220,6 +221,33 @@
       renderDashboard();
       publishWidgets();
       await notifyDashboard("Dashboard reset failed", error.message, "danger");
+    }
+  }
+
+  async function clearExperimentResults() {
+    if (!await confirmDashboardAction(
+      "Clear experiment results",
+      "Clear historical experiment result records for the selected identity? "
+        + "Running experiments, Slurm jobs, reservations, downloaded artifacts, "
+        + "service state, operations, progress, and layout are not removed.",
+      { severity: "danger", confirmLabel: "Clear results" },
+    )) return;
+    experimentResultsClearStatus = "running";
+    renderDashboard();
+    publishWidgets();
+    try {
+      await request("/api/qfw-dashboard/experiments/clear", {
+        method: "POST",
+        body: JSON.stringify({ identity: activeIdentity }),
+      });
+      experimentResultsClearStatus = "succeeded";
+      renderDashboard();
+      await refreshState();
+    } catch (error) {
+      experimentResultsClearStatus = "failed";
+      renderDashboard();
+      publishWidgets();
+      await notifyDashboard("Experiment results clear failed", error.message, "danger");
     }
   }
 
@@ -597,6 +625,28 @@
 
   function experimentTable(records, results) {
     const wrapper = preserveScroll(element("div", "qfw-table-wrap"));
+    if (results) {
+      const controls = element("div", "qfw-widget-actions");
+      const clear = element(
+        "button", "qfw-experiment-results-clear danger", "Clear results",
+      );
+      const status = element("output", "qfw-experiment-results-clear-status");
+      clear.type = "button";
+      clear.disabled = experimentResultsClearStatus === "running";
+      clear.classList.toggle(
+        "is-pressed", experimentResultsClearStatus === "running",
+      );
+      clear.setAttribute(
+        "aria-pressed", String(experimentResultsClearStatus === "running"),
+      );
+      status.setAttribute("aria-live", "polite");
+      status.textContent = {
+        idle: "", running: "Clearing…", succeeded: "Cleared", failed: "Failed",
+      }[experimentResultsClearStatus] || experimentResultsClearStatus;
+      clear.addEventListener("click", () => { void clearExperimentResults(); });
+      controls.append(clear, status);
+      wrapper.append(controls);
+    }
     const value = element("table", "qfw-table");
     const head = element("thead");
     const header = element("tr");

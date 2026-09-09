@@ -105,6 +105,53 @@ def test_dashboard_reset_rejects_a_tracked_live_slurm_job(tmp_path) -> None:
     assert dashboard.store.experiments()[0]["experiment_id"] == "exp"
 
 
+def test_clear_experiment_results_removes_only_historical_records(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    old = Experiment("old", "user-a", "nwqsim", "qiskit-simple", "normal")
+    old.slurm_job_id = "10"
+    active = Experiment("active", "user-a", "nwqsim", "qiskit-simple", "normal")
+    active.slurm_job_id = "42"
+    other = Experiment("other", "user-b", "nwqsim", "qiskit-simple", "normal")
+    dashboard.store.save_experiment(old)
+    dashboard.store.save_experiment(active)
+    dashboard.store.save_experiment(other)
+    dashboard._state_cache = {"stale": True}
+    dashboard._state_cached_at = 10
+
+    with patch.object(dashboard.runner, "cluster") as cluster:
+        cluster.return_value = CommandResult(("squeue",), 0, "42\n", "")
+        result = dashboard.clear_experiment_results("root")
+
+    assert result["cleared"] == {"experiments": 2}
+    assert [item["experiment_id"] for item in dashboard.store.experiments()] == [
+        "active"
+    ]
+    assert dashboard._state_cache is None
+    assert dashboard._state_cached_at == 0
+
+
+def test_clear_experiment_results_is_scoped_to_identity(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    dashboard.store.save_experiment(
+        Experiment("mine", "user-a", "nwqsim", "qiskit-simple", "normal")
+    )
+    dashboard.store.save_experiment(
+        Experiment("other", "user-b", "nwqsim", "qiskit-simple", "normal")
+    )
+
+    result = dashboard.clear_experiment_results("user-a")
+
+    assert result["cleared"] == {"experiments": 1}
+    assert [item["experiment_id"] for item in dashboard.store.experiments()] == [
+        "other"
+    ]
+
+
+def test_clear_experiment_results_rejects_unknown_identity(tmp_path) -> None:
+    with pytest.raises(ValueError, match="unsupported identity"):
+        service(tmp_path).clear_experiment_results("nobody")
+
+
 @pytest.mark.parametrize(
     ("action", "expected"),
     (
