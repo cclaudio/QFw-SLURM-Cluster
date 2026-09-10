@@ -213,7 +213,7 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
     payload = _first_json_object(output) or {}
     services = payload.get("services") or {}
     records: list[dict[str, Any]] = []
-    for component in ("directory", "nwqsim", "iqm", "gateway"):
+    for component in ("directory", "nwqsim", "iqm", "shim", "gateway"):
         entry = services.get(component) or {}
         document = entry.get("detail") if isinstance(entry, dict) else {}
         document = document if isinstance(document, dict) else {}
@@ -221,6 +221,7 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
             "directory": "directory",
             "nwqsim": "qpm:nwqsim",
             "iqm": "qpm:iqm-ornl-20q",
+            "shim": "qpm:shim-ornl-20q",
         }.get(component)
         managed = document.get("components", {}).get(component_key, {}) \
             if component_key else {}
@@ -239,6 +240,7 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
                 "directory": "directory-service",
                 "nwqsim": "nwqsim",
                 "iqm": "iqm-ornl-20q",
+                "shim": "shim-ornl-20q",
                 "gateway": "qfw-slurm-gateway",
             }[component],
             "node": managed.get("node", "slurmctld" if component in {
@@ -249,6 +251,7 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
                 "directory": "DEFw",
                 "nwqsim": "NWQSim",
                 "iqm": "IQM",
+                "shim": "Shim",
                 "gateway": "QSGP",
             }[component],
             "active_reservations": "—",
@@ -290,7 +293,7 @@ def reconcile_qpm_registration(
     records: list[dict[str, Any]] = []
     for original in service_plane.records:
         record = dict(original)
-        if record.get("component") not in {"nwqsim", "iqm"}:
+        if record.get("component") not in {"nwqsim", "iqm", "shim"}:
             records.append(record)
             continue
         process_state = str(record.get("state", "stopped")).lower()
@@ -357,6 +360,7 @@ def service_health_summary(
         "directory": "Directory",
         "nwqsim": "NWQSim",
         "iqm": "IQM",
+        "shim": "Shim",
         "gateway": "Gateway",
     }
     selected = list(labels) if target == "all" else [target]
@@ -499,7 +503,7 @@ def diagnostics(runner: CommandRunner) -> SourceState:
             }
         )
     clock_values = []
-    for container in ("c1", "nwqsim-head", "iqm-head"):
+    for container in ("c1", "nwqsim-head", "iqm-head", "shim-head"):
         try:
             result = runner.cluster("root", (
                 "bash", "-lc",

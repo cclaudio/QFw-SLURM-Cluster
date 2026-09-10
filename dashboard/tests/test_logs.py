@@ -3,7 +3,12 @@ from pathlib import Path
 
 import pytest
 
-from qfw_slurm_dashboard.logs import LogSource, SOURCES, read_source
+from qfw_slurm_dashboard.logs import (
+    LogSource,
+    SERVICE_DIAGNOSTICS,
+    SOURCES,
+    read_source,
+)
 from qfw_slurm_dashboard.runner import CommandResult
 
 
@@ -29,6 +34,27 @@ def test_service_logs_are_not_exposed_to_regular_users() -> None:
         read_source(
             Runner(), SOURCES["iqm-qpm"], identity="user-a", cursor=0, limit=10
         )
+
+
+def test_shim_qpm_log_source_uses_shim_node() -> None:
+    source = SOURCES["shim-qpm"]
+    assert source.container == "shim-head"
+    assert "shim-ornl-20q/logs/defw_py.log" in source.path
+
+
+def test_shim_service_diagnostics_include_defw_logs() -> None:
+    diagnostics = {
+        item.name: item
+        for item in SERVICE_DIAGNOSTICS["shim-ornl-20q"]
+    }
+    assert diagnostics["logs/defw_py.log"].container == "shim-head"
+    assert diagnostics["logs/defw_out.log"].container == "shim-head"
+    assert "shim-ornl-20q/logs/defw_py.log" in (
+        diagnostics["logs/defw_py.log"].path
+    )
+    assert "shim-ornl-20q/logs/defw_out.log" in (
+        diagnostics["logs/defw_out.log"].path
+    )
 
 
 def test_application_log_retains_captured_identity() -> None:

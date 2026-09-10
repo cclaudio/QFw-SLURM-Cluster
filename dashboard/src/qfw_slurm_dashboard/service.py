@@ -149,7 +149,7 @@ class DashboardService:
             "./do_stop.sh delete && ./do_build.sh && ./do_startup.sh",
         ),
     }
-    SERVICE_TARGETS = {"all", "directory", "nwqsim", "iqm", "gateway"}
+    SERVICE_TARGETS = {"all", "directory", "nwqsim", "iqm", "shim", "gateway"}
     SERVICE_OPERATIONS = {"start", "stop", "restart", "recover", "status"}
 
     def __init__(self, cluster_root: Path, state_root: Path) -> None:
@@ -1632,8 +1632,9 @@ class DashboardService:
             raise ValueError("unsupported identity")
         if not _SAFE_NAME.fullmatch(target):
             raise ValueError("invalid shell target")
-        service_nodes = {"iqm-head", "nwqsim-head", "nwqsim-worker-1",
-                         "nwqsim-worker-2", "slurmdbd", "slurmrestd", "mysql"}
+        service_nodes = {"iqm-head", "shim-head", "nwqsim-head",
+                         "nwqsim-worker-1", "nwqsim-worker-2", "slurmdbd",
+                         "slurmrestd", "mysql"}
         if target in service_nodes and identity != "root":
             raise PermissionError("service-node shells require root selection")
         home = "/root" if identity == "root" else f"/workspace/home/{identity}"

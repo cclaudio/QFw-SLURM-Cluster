@@ -46,6 +46,7 @@ class FakeRunner:
                 '"directory":{"state":"down","detail":{"state":"stopped"}},'
                 '"nwqsim":{"state":"down","detail":{"state":"stopped"}},'
                 '"iqm":{"state":"down","detail":{"state":"stopped"}},'
+                '"shim":{"state":"down","detail":{"state":"stopped"}},'
                 '"gateway":{"state":"down","detail":{"state":"stopped"}}}}\n',
                 "",
             )
@@ -161,6 +162,7 @@ def test_service_plane_reports_each_component_independently() -> None:
     "directory":{"state":"down","detail":{"components":{"directory":{"node":"slurmctld","ready":false,"state":"stopped"}}}},
     "nwqsim":{"state":"up","detail":{"components":{"prte-dvm":{"node":"nwqsim-head","ready":true,"state":"ready"},"qpm:nwqsim":{"node":"nwqsim-head","ready":true,"state":"ready"}}}},
     "iqm":{"state":"up","detail":{"components":{"qpm:iqm-ornl-20q":{"node":"iqm-head","ready":true,"state":"ready"}}}},
+    "shim":{"state":"up","detail":{"components":{"qpm:shim-ornl-20q":{"node":"shim-head","ready":true,"state":"ready"}}}},
     "gateway":{"state":"up","detail":{"state":"ready"}}
   }
 }
@@ -174,6 +176,7 @@ def test_service_plane_reports_each_component_independently() -> None:
     assert records["nwqsim"]["state"] == "ready"
     assert records["dvm"]["state"] == "ready"
     assert records["iqm"]["state"] == "ready"
+    assert records["shim"]["state"] == "ready"
     assert records["gateway"]["state"] == "ready"
 
 

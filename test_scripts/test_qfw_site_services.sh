@@ -24,6 +24,7 @@ fi
 grep -q '^slurmctld: qfw-dir-svc start ' "${temporary}/start.out"
 grep -q '^nwqsim-head: qfw-qpm-svc start ' "${temporary}/start.out"
 grep -q '^iqm-head: qfw-qpm-svc start ' "${temporary}/start.out"
+grep -q '^shim-head: qfw-qpm-svc start ' "${temporary}/start.out"
 grep -q '^slurmctld: qfw gateway start$' "${temporary}/start.out"
 grep -q 'nwqsim-head,nwqsim-worker-1,nwqsim-worker-2' \
 	"${temporary}/start.out"
@@ -33,6 +34,7 @@ grep -q 'QFw site services are ready' "${temporary}/start.out"
 grep -q '^slurmctld: qfw-dir-svc status ' "${temporary}/status.out"
 grep -q '^nwqsim-head: qfw-qpm-svc status ' "${temporary}/status.out"
 grep -q '^iqm-head: qfw-qpm-svc status ' "${temporary}/status.out"
+grep -q '^shim-head: qfw-qpm-svc status ' "${temporary}/status.out"
 grep -q '^slurmctld: qfw gateway status$' "${temporary}/status.out"
 
 (
@@ -43,6 +45,7 @@ grep -q '^slurmctld: qfw gateway status$' "${temporary}/status.out"
 	directory_ready() { echo '{"state":"stopped"}'; return 1; }
 	nwqsim_ready() { echo '{"state":"stale"}'; return 1; }
 	iqm_ready() { echo '{"state":"stale"}'; return 1; }
+	shim_ready() { echo '{"state":"stale"}'; return 1; }
 	gateway_managed_ready() { echo 'not-ready'; return 1; }
 	service_status
 ) >"${temporary}/health-summary.out"
@@ -52,6 +55,7 @@ QFw site services: DOWN
 Directory: DOWN
 NWQSim: DOWN
 IQM: DOWN
+Shim: DOWN
 Gateway: DOWN
 EOF
 cmp "${temporary}/health-summary.expected" "${temporary}/health-summary.out"
@@ -64,6 +68,7 @@ cmp "${temporary}/health-summary.expected" "${temporary}/health-summary.out"
 	directory_ready() { echo '{"state":"ready"}'; }
 	nwqsim_ready() { echo '{"state":"ready"}'; }
 	iqm_ready() { echo '{"state":"ready"}'; }
+	shim_ready() { echo '{"state":"ready"}'; }
 	gateway_managed_ready() { echo 'ready'; }
 	service_status
 ) >"${temporary}/health.json"
@@ -75,10 +80,12 @@ with open(sys.argv[1], encoding="utf-8") as stream:
     status = json.load(stream)
 assert status["schema"] == "qfw-site-services-status-v1"
 assert status["state"] == "up"
-assert set(status["services"]) == {"directory", "nwqsim", "iqm", "gateway"}
+assert set(status["services"]) == {
+    "directory", "nwqsim", "iqm", "shim", "gateway"
+}
 PY
 
-for target in directory nwqsim iqm gateway; do
+for target in directory nwqsim iqm shim gateway; do
 	"${command}" --dry-run start --target "${target}" \
 		>"${temporary}/start-${target}.out"
 	"${command}" --dry-run status --target "${target}" \
@@ -94,6 +101,8 @@ grep -q '^nwqsim-head: qfw-qpm-svc start ' \
 	"${temporary}/start-nwqsim.out"
 grep -q '^iqm-head: qfw-qpm-svc start ' \
 	"${temporary}/start-iqm.out"
+grep -q '^shim-head: qfw-qpm-svc start ' \
+	"${temporary}/start-shim.out"
 grep -q '^slurmctld: qfw gateway start$' \
 	"${temporary}/start-gateway.out"
 if "${command}" --dry-run status --target missing >/dev/null 2>&1; then
@@ -103,10 +112,12 @@ fi
 
 "${command}" --dry-run stop >"${temporary}/stop.out"
 gateway_line="$(grep -n 'qfw gateway stop$' "${temporary}/stop.out" | cut -d: -f1)"
+shim_line="$(grep -n '^shim-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
 iqm_line="$(grep -n '^iqm-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
 nwqsim_line="$(grep -n '^nwqsim-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
 directory_line="$(grep -n '^slurmctld: qfw-dir-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
-[[ "${gateway_line}" -lt "${iqm_line}" ]]
+[[ "${gateway_line}" -lt "${shim_line}" ]]
+[[ "${shim_line}" -lt "${iqm_line}" ]]
 [[ "${iqm_line}" -lt "${nwqsim_line}" ]]
 [[ "${nwqsim_line}" -lt "${directory_line}" ]]
 
@@ -116,6 +127,7 @@ directory_line="$(grep -n '^slurmctld: qfw-dir-svc stop ' "${temporary}/stop.out
 	directory_ready() { return 0; }
 	nwqsim_ready() { return 0; }
 	iqm_ready() { return 0; }
+	shim_ready() { return 0; }
 	gateway_managed_ready() { return 0; }
 	run_qfw() { return 99; }
 	run_gateway() { return 99; }
@@ -124,6 +136,7 @@ directory_line="$(grep -n '^slurmctld: qfw-dir-svc stop ' "${temporary}/stop.out
 grep -q 'Directory service is already ready' "${temporary}/already-ready.out"
 grep -q 'NWQSim QPM is already ready' "${temporary}/already-ready.out"
 grep -q 'IQM QPM is already ready' "${temporary}/already-ready.out"
+grep -q 'Shim QPM is already ready' "${temporary}/already-ready.out"
 grep -q 'QFw Slurm gateway is already ready' "${temporary}/already-ready.out"
 
 : >"${temporary}/non-ready.events"
@@ -134,18 +147,21 @@ grep -q 'QFw Slurm gateway is already ready' "${temporary}/already-ready.out"
 	directory_ready() { return 1; }
 	nwqsim_ready() { return 1; }
 	iqm_ready() { return 1; }
+	shim_ready() { return 1; }
 	gateway_managed_ready() { return 1; }
 	require_directory() { return 0; }
 	wait_for_gateway() { return 0; }
 	stop_directory() { echo stop-directory >>"${temporary}/non-ready.calls"; }
 	stop_nwqsim() { echo stop-nwqsim >>"${temporary}/non-ready.calls"; }
 	stop_iqm() { echo stop-iqm >>"${temporary}/non-ready.calls"; }
+	stop_shim() { echo stop-shim >>"${temporary}/non-ready.calls"; }
 	stop_gateway() { echo stop-gateway >>"${temporary}/non-ready.calls"; }
 	run_qfw() { echo "run-qfw:$1:$2" >>"${temporary}/non-ready.calls"; }
 	run_gateway() { echo "run-gateway:$1" >>"${temporary}/non-ready.calls"; }
 	start_directory
 	start_nwqsim
 	start_iqm
+	start_shim
 	start_gateway
 ) >"${temporary}/non-ready.events"
 grep -q 'Directory service is not ready; cleaning retained state' \
@@ -157,10 +173,13 @@ grep -q '^stop-nwqsim$' "${temporary}/non-ready.calls"
 grep -q 'IQM QPM is not ready; cleaning retained state' \
 	"${temporary}/non-ready.events"
 grep -q '^stop-iqm$' "${temporary}/non-ready.calls"
+grep -q 'Shim QPM is not ready; cleaning retained state' \
+	"${temporary}/non-ready.events"
+grep -q '^stop-shim$' "${temporary}/non-ready.calls"
 grep -q 'QFw Slurm gateway is not ready; cleaning retained state' \
 	"${temporary}/non-ready.events"
 grep -q '^stop-gateway$' "${temporary}/non-ready.calls"
-[[ "$(grep -c '^run-qfw:' "${temporary}/non-ready.calls")" -eq 3 ]]
+[[ "$(grep -c '^run-qfw:' "${temporary}/non-ready.calls")" -eq 4 ]]
 grep -q '^run-gateway:start$' "${temporary}/non-ready.calls"
 
 (
@@ -169,17 +188,21 @@ grep -q '^run-gateway:start$' "${temporary}/non-ready.calls"
 	directory_up=false
 	nwqsim_up=true
 	iqm_up=true
+	shim_up=true
 	gateway_up=true
 	directory_ready() { ${directory_up}; }
 	nwqsim_ready() { ${nwqsim_up}; }
 	iqm_ready() { ${iqm_up}; }
+	shim_ready() { ${shim_up}; }
 	gateway_managed_ready() { ${gateway_up}; }
 	stop_gateway() { echo stop-gateway; gateway_up=false; }
+	stop_shim() { echo stop-shim; shim_up=false; }
 	stop_iqm() { echo stop-iqm; iqm_up=false; }
 	stop_nwqsim() { echo stop-nwqsim; nwqsim_up=false; }
 	start_directory() { echo start-directory; directory_up=true; }
 	start_nwqsim() { echo start-nwqsim; nwqsim_up=true; }
 	start_iqm() { echo start-iqm; iqm_up=true; }
+	start_shim() { echo start-shim; shim_up=true; }
 	start_gateway() { echo start-gateway; gateway_up=true; }
 	stop_directory() { echo stop-directory; directory_up=false; }
 	start_services
@@ -188,11 +211,13 @@ sed '/QFw site services are ready/d' "${temporary}/partial-state.out" \
 	>"${temporary}/partial-state.events"
 cat >"${temporary}/partial-state.expected" <<'EOF'
 stop-gateway
+stop-shim
 stop-iqm
 stop-nwqsim
 start-directory
 start-nwqsim
 start-iqm
+start-shim
 start-gateway
 EOF
 cmp "${temporary}/partial-state.expected" "${temporary}/partial-state.events"
@@ -203,9 +228,11 @@ cmp "${temporary}/partial-state.expected" "${temporary}/partial-state.events"
 	dry_run=false
 	directory_up=true
 	nwqsim_up=false
+	iqm_up=false
 	directory_ready() { ${directory_up}; }
 	nwqsim_ready() { ${nwqsim_up}; }
-	iqm_ready() { return 1; }
+	iqm_ready() { ${iqm_up}; }
+	shim_ready() { return 1; }
 	gateway_managed_ready() { return 1; }
 	start_directory() { return 0; }
 	start_nwqsim() {
@@ -213,8 +240,16 @@ cmp "${temporary}/partial-state.expected" "${temporary}/partial-state.events"
 		nwqsim_up=true
 	}
 	start_iqm() {
-		echo fail-iqm >>"${temporary}/rollback.events"
+		echo start-iqm >>"${temporary}/rollback.events"
+		iqm_up=true
+	}
+	start_shim() {
+		echo fail-shim >>"${temporary}/rollback.events"
 		return 1
+	}
+	stop_iqm() {
+		echo stop-iqm >>"${temporary}/rollback.events"
+		iqm_up=false
 	}
 	stop_nwqsim() {
 		echo stop-nwqsim >>"${temporary}/rollback.events"
@@ -227,7 +262,9 @@ cmp "${temporary}/partial-state.expected" "${temporary}/partial-state.events"
 	! start_services
 )
 grep -q '^start-nwqsim$' "${temporary}/rollback.events"
-grep -q '^fail-iqm$' "${temporary}/rollback.events"
+grep -q '^start-iqm$' "${temporary}/rollback.events"
+grep -q '^fail-shim$' "${temporary}/rollback.events"
+grep -q '^stop-iqm$' "${temporary}/rollback.events"
 grep -q '^stop-nwqsim$' "${temporary}/rollback.events"
 if grep -q '^stop-directory$' "${temporary}/rollback.events"; then
 	echo "rollback stopped a pre-existing directory" >&2

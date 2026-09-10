@@ -78,11 +78,11 @@
     ["warning", "Warning"],
     ["info", "Info"],
     ["debug", "Debug"],
-    ["DEFW_APP", "DEFw app"],
-    ["DEFW_SERVICE", "DEFw service"],
-    ["DEFW_RPC", "DEFw RPC"],
-    ["DEFW_WORKER", "DEFw worker"],
     ["DEFW_CORE", "DEFw core"],
+    ["DEFW_WORKER", "DEFw worker"],
+    ["DEFW_SERVICE", "DEFw service"],
+    ["DEFW_APP", "DEFw app"],
+    ["DEFW_RPC", "DEFw RPC"],
     ["DEFW_STACKTRACE", "DEFw stacktrace"],
     ["DEFW_ALL", "DEFw all"],
   ];
@@ -92,6 +92,7 @@
     "nwqsim",
     "nwqsim-dvm",
     "iqm-ornl-20q",
+    "shim-ornl-20q",
   ]);
   let runtimeApi = null;
   let activeIdentity = "user-a";
@@ -1104,6 +1105,7 @@
                 "nwqsim-dvm": "nwqsim-dvm",
                 nwqsim: "nwqsim-qpm",
                 "iqm-ornl-20q": "iqm-qpm",
+                "shim-ornl-20q": "shim-qpm",
               }[item.service_id || item.name] || "",
               jobs: [...(qpmJobs.get(item.service_id || item.name)?.values() || [])],
               state: item.state || item.status,
@@ -1961,7 +1963,8 @@
     const services = element("div", "qfw-operation-control qfw-operation-services");
     const serviceTarget = selectControl(widget, "target", [
       ["all", "All services"], ["directory", "Directory"],
-      ["nwqsim", "NWQSim"], ["iqm", "IQM"], ["gateway", "Gateway"],
+      ["nwqsim", "NWQSim"], ["iqm", "IQM"], ["shim", "Shim"],
+      ["gateway", "Gateway"],
     ], "all");
     const serviceAction = selectControl(widget, "operation", [
       ["status", "Status"], ["start", "Start"], ["stop", "Stop"],
@@ -2100,12 +2103,14 @@
     const shellTarget = element("select");
     shellTarget.dataset.qfwControl = "node";
     ["slurmctld", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8",
-      "nwqsim-head", "nwqsim-worker-1", "nwqsim-worker-2", "iqm-head"]
+      "nwqsim-head", "nwqsim-worker-1", "nwqsim-worker-2", "iqm-head",
+      "shim-head"]
       .forEach((name) => {
         const option = element("option", "", name);
         option.value = name;
         option.disabled = activeIdentity !== "root"
-          && (name.startsWith("nwqsim-") || name === "iqm-head");
+          && (name.startsWith("nwqsim-") || name === "iqm-head"
+            || name === "shim-head");
         shellTarget.append(option);
       });
     shellTarget.value = controlValue(widget, "node", "slurmctld");
@@ -3545,7 +3550,7 @@
       if (!["status", "start", "stop", "restart", "recover"].includes(
         values.operation,
       )) return;
-      if (!["all", "directory", "nwqsim", "iqm", "gateway"].includes(values.target)) return;
+      if (!["all", "directory", "nwqsim", "iqm", "shim", "gateway"].includes(values.target)) return;
       await runOperation("services", {
         action: `service-${values.operation}`, target: values.target,
       });
@@ -3624,7 +3629,8 @@
     const source = element("select");
     source.dataset.qfwFilter = "source";
     ["application", "slurm", "gateway", "directory", "nwqsim-qpm",
-      "nwqsim-dvm", "nwqsim-simulator", "iqm-qpm", "iqm-provider"]
+      "nwqsim-dvm", "nwqsim-simulator", "iqm-qpm", "iqm-provider",
+      "shim-qpm", "shim-provider"]
       .forEach((name) => {
         const option = element("option", "", name);
         option.value = name;

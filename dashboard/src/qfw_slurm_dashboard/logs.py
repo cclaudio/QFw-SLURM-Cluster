@@ -64,6 +64,16 @@ SOURCES = {
         "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/services/"
         "iqm-ornl-20q/logs/defw_py.log",
     ),
+    "shim-qpm": LogSource(
+        "qpmd", "shim-ornl-20q", "shim-head",
+        "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
+        "shim-ornl-20q/logs/defw_py.log",
+    ),
+    "shim-provider": LogSource(
+        "provider", "shim-qrmi-qdmi", "shim-head",
+        "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
+        "shim-ornl-20q/logs/defw_py.log",
+    ),
 }
 
 
@@ -143,6 +153,29 @@ SERVICE_DIAGNOSTICS = {
                        "iqm-ornl-20q/service-ready.json"),
         DiagnosticFile("state/service-plane.json", "iqm-head",
                        "/var/lib/qfw-site-services/qpm/iqm-ornl-20q/state/"
+                       "service-plane.json"),
+    ),
+    "shim-ornl-20q": (
+        DiagnosticFile("logs/defw_py.log", "shim-head",
+                       "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
+                       "shim-ornl-20q/logs/defw_py.log"),
+        DiagnosticFile("logs/defw_out.log", "shim-head",
+                       "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
+                       "shim-ornl-20q/logs/defw_out.log"),
+        DiagnosticFile("logs/stdout.log", "shim-head",
+                       "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
+                       "shim-ornl-20q/logs/shim-ornl-20q.stdout.log"),
+        DiagnosticFile("logs/stderr.log", "shim-head",
+                       "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
+                       "shim-ornl-20q/logs/shim-ornl-20q.stderr.log"),
+        DiagnosticFile("state/ready.json", "shim-head",
+                       "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
+                       "shim-ornl-20q/ready.json"),
+        DiagnosticFile("state/service-ready.json", "shim-head",
+                       "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
+                       "shim-ornl-20q/service-ready.json"),
+        DiagnosticFile("state/service-plane.json", "shim-head",
+                       "/var/lib/qfw-site-services/qpm/shim-ornl-20q/state/"
                        "service-plane.json"),
     ),
 }

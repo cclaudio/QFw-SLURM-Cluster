@@ -726,6 +726,8 @@ def test_regular_shell_target_must_be_allocated(tmp_path) -> None:
 def test_regular_shell_cannot_target_service_node(tmp_path) -> None:
     with pytest.raises(PermissionError, match="service-node"):
         service(tmp_path).shell_context("user-a", "iqm-head")
+    with pytest.raises(PermissionError, match="service-node"):
+        service(tmp_path).shell_context("user-a", "shim-head")
 
 
 def test_experiment_archive_contains_manifest_and_all_artifacts(tmp_path) -> None:
