@@ -748,6 +748,13 @@ def test_experiment_archive_contains_manifest_and_all_artifacts(tmp_path) -> Non
             )
         cluster.side_effect = respond
         payload = dashboard.experiment_archive("result", "user-a")
+    read_calls = [
+        call for call in cluster.call_args_list
+        if call.args[1][0:2] == ("python3", "-c")
+    ]
+    assert read_calls
+    assert all(call.args[1][-1] == "" for call in read_calls)
+    assert all(call.kwargs["timeout"] == 300 for call in read_calls)
     archive_data = base64.b64decode(payload["content_base64"])
     with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
         assert sorted(archive.namelist()) == [
@@ -823,6 +830,13 @@ def test_service_archive_is_root_only_and_contains_diagnostics(tmp_path) -> None
         and call.args[1][-2] in diagnostic_paths
     }
     assert read_paths == diagnostic_paths
+    read_calls = [
+        call for call in cluster.call_args_list
+        if call.args[1][0:2] == ("python3", "-c")
+    ]
+    assert read_calls
+    assert all(call.args[1][-1] == "" for call in read_calls)
+    assert all(call.kwargs["timeout"] == 300 for call in read_calls)
     archive_data = base64.b64decode(payload["content_base64"])
     with zipfile.ZipFile(io.BytesIO(archive_data)) as archive:
         assert "service-status.json" in archive.namelist()

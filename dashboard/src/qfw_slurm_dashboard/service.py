@@ -1606,7 +1606,7 @@ class DashboardService:
                     missing.append(f"{path}: outside experiment home")
                     continue
                 try:
-                    data = self._read_artifact(owner, path, max_bytes=67108864)
+                    data = self._read_artifact(owner, path, max_bytes=None)
                 except RuntimeError as error:
                     missing.append(f"{path}: {error}")
                     continue
@@ -1658,7 +1658,7 @@ class DashboardService:
                 try:
                     data = self._read_cluster_file(
                         "root", diagnostic.container, diagnostic.path,
-                        max_bytes=67108864,
+                        max_bytes=None,
                     )
                 except RuntimeError as error:
                     missing.append(f"{diagnostic.path}: {error}")
@@ -1681,7 +1681,7 @@ class DashboardService:
         }
 
     def _read_artifact(
-        self, owner: str, path: str, *, max_bytes: int = 8388608
+        self, owner: str, path: str, *, max_bytes: int | None = 8388608
     ) -> bytes:
         return self._read_cluster_file(
             owner, "slurmctld", path, max_bytes=max_bytes
@@ -1738,19 +1738,23 @@ class DashboardService:
 
     def _read_cluster_file(
         self, identity: str, container: str, path: str, *,
-        max_bytes: int = 8388608,
+        max_bytes: int | None = 8388608,
     ) -> bytes:
         reader = (
             "import base64, pathlib, sys; "
             "p=pathlib.Path(sys.argv[1]); "
             "data=p.read_bytes(); "
-            "limit=int(sys.argv[2]); "
-            "assert len(data) <= limit, f'artifact exceeds {limit} bytes'; "
+            "limit=sys.argv[2]; "
+            "assert not limit or len(data) <= int(limit), "
+            "f'artifact exceeds {limit} bytes'; "
             "print(base64.b64encode(data).decode('ascii'))"
         )
+        timeout = 300 if max_bytes is None else 15
         result = self.runner.cluster(
-            identity, ("python3", "-c", reader, path, str(max_bytes)),
-            container=container, timeout=15,
+            identity,
+            ("python3", "-c", reader, path, "" if max_bytes is None else str(max_bytes)),
+            container=container,
+            timeout=timeout,
         )
         if result.returncode:
             raise RuntimeError(result.stderr or result.stdout)
