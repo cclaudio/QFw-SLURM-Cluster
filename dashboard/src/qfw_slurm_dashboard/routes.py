@@ -196,6 +196,17 @@ def _preview(request: RouteRequest) -> JsonResponse:
         return _error(error)
 
 
+def _save_application_batch_script(request: RouteRequest) -> JsonResponse:
+    try:
+        result = _service(request).save_application_batch_script(request.body())
+        return JsonResponse({
+            "schema": "qfw-dashboard-application-batch-v1",
+            **result,
+        })
+    except Exception as error:
+        return _error(error)
+
+
 def _experiment(request: RouteRequest) -> JsonResponse:
     try:
         experiment = _service(request).submit_experiment(request.body())
@@ -306,6 +317,10 @@ ROUTES = (
         "clear-experiment-results",
     ),
     route("POST", "/api/qfw-dashboard/preview", "preview"),
+    route(
+        "POST", "/api/qfw-dashboard/applications/batch-script",
+        "save-application-batch-script",
+    ),
     route("POST", "/api/qfw-dashboard/experiments", "experiment"),
     route(
         "POST", "/api/qfw-dashboard/experiments/batch", "experiment-batch"
@@ -329,6 +344,7 @@ HANDLERS: dict[str, Any] = {
     "reset": _reset,
     "clear-experiment-results": _clear_experiment_results,
     "preview": _preview,
+    "save-application-batch-script": _save_application_batch_script,
     "experiment": _experiment,
     "experiment-batch": _experiment_batch,
     "cancel": _cancel,

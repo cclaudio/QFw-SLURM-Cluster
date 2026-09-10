@@ -2463,6 +2463,17 @@
         applicationSource.append(option);
       });
     applicationSource.value = draft.application_source || "example";
+    const applicationSubmissionType = element("select");
+    [
+      ["executable", "Executable"],
+      ["sbatch", "Existing sbatch script"],
+    ].forEach(([value, label]) => {
+      const option = element("option", "", label);
+      option.value = value;
+      applicationSubmissionType.append(option);
+    });
+    applicationSubmissionType.value =
+      draft.application_submission_type === "sbatch" ? "sbatch" : "executable";
     const example = element("select");
     example.dataset.qfwApplicationExample = "";
     const discoveredExamples = packagedExamples();
@@ -2476,16 +2487,56 @@
     const applicationPath = element("input");
     applicationPath.placeholder = "/workspace/path/to/application";
     applicationPath.value = draft.application_path || "";
+    const applicationArguments = element("input");
+    applicationArguments.placeholder = "--flag value";
+    applicationArguments.value = draft.application_arguments || "";
+    const batchScriptEditor = element(
+      "textarea",
+      "qfw-command-preview qfw-batch-script-editor qfw-resizable-text",
+    );
+    batchScriptEditor.value = draft.batch_script || "";
+    batchScriptEditor.placeholder = "Preview to generate an sbatch script.";
+    batchScriptEditor.spellcheck = false;
+    const batchScriptPath = element(
+      "span", "qfw-batch-script-save-path", "Save path appears after preview.",
+    );
+    const saveBatchScript = iconButton("save", "Save sbatch beside application");
+    const batchScriptStatus = element("span", "qfw-batch-script-status");
+    const batchScriptActions = element("div", "qfw-batch-script-actions");
+    batchScriptActions.append(saveBatchScript, batchScriptPath, batchScriptStatus);
     const sourceField = field("Application source", applicationSource);
+    const submissionTypeField = field(
+      "Submission type",
+      applicationSubmissionType,
+      "Executable mode generates an editable sbatch script.",
+    );
     const exampleField = field("QFw example", example);
     const pathField = field("Application path", applicationPath,
       "Use an absolute path beneath /workspace.");
+    const argumentsField = field(
+      "Command-line parameters",
+      applicationArguments,
+      "Shell-style arguments for executable mode.",
+    );
+    const batchScriptField = field(
+      "Generated sbatch",
+      batchScriptEditor,
+      "Submit uses the text currently shown here.",
+    );
+    batchScriptField.classList.add("qfw-batch-script-field");
     const applicationParameterFields = element(
       "div", "qfw-application-parameters",
     );
     const applicationParameterControls = new Map();
     applicationPhase.fields.append(
-      sourceField, exampleField, pathField, applicationParameterFields,
+      sourceField,
+      submissionTypeField,
+      exampleField,
+      pathField,
+      argumentsField,
+      batchScriptField,
+      batchScriptActions,
+      applicationParameterFields,
     );
 
     function selectedExampleRecord() {
@@ -2710,16 +2761,29 @@
 
     function updateApplicationFields() {
       const custom = applicationSource.value === "path";
+      const executable = custom && applicationSubmissionType.value === "executable";
       exampleField.hidden = custom;
+      submissionTypeField.hidden = !custom;
       pathField.hidden = !custom && example.value !== "chemistry";
+      argumentsField.hidden = !executable;
+      batchScriptField.hidden = !executable;
+      batchScriptActions.hidden = !executable;
       pathField.firstElementChild.textContent = custom
-        ? "Application path" : "Chemistry application path";
+        ? (applicationSubmissionType.value === "sbatch"
+          ? "SBATCH script path" : "Application path")
+        : "Chemistry application path";
+      saveBatchScript.disabled = !executable || !batchScriptEditor.value.trim();
     }
 
     backend.addEventListener("change", updateBackendConstraints);
     applicationSource.addEventListener("change", () => {
       updateApplicationFields();
       renderApplicationParameters();
+    });
+    applicationSubmissionType.addEventListener("change", updateApplicationFields);
+    batchScriptEditor.addEventListener("input", () => {
+      batchScriptStatus.textContent = "";
+      updateApplicationFields();
     });
     example.addEventListener("change", () => {
       updateApplicationFields();
@@ -2742,15 +2806,37 @@
     );
     previewOutput.dataset.qfwSubmissionOutput = "";
     let experimentId = draft.experiment_id || window.crypto.randomUUID();
+    let applicationBatchScriptSavePath =
+      draft.application_batch_script_save_path || "";
+
+    function setBatchScriptPreview(payload) {
+      if (payload.batch_script !== undefined) {
+        batchScriptEditor.value = payload.batch_script || "";
+      }
+      applicationBatchScriptSavePath =
+        payload.application_batch_script_save_path || applicationBatchScriptSavePath;
+      batchScriptPath.textContent = applicationBatchScriptSavePath
+        ? `Save beside application: ${applicationBatchScriptSavePath}`
+        : "Save path appears after preview.";
+      batchScriptStatus.textContent = "";
+      updateApplicationFields();
+    }
+
     function formPayload() {
       const payload = {
         experiment_id: experimentId,
         identity: activeIdentity,
         backend: backend.value,
         application_source: applicationSource.value,
+        application_submission_type: applicationSubmissionType.value,
         example: applicationSource.value === "example" ? example.value : "custom",
         application_path: applicationPath.value.trim(),
+        application_arguments: applicationArguments.value.trim(),
         application_parameters: currentApplicationParameters(),
+        batch_script: applicationSource.value === "path"
+          && applicationSubmissionType.value === "executable"
+          ? batchScriptEditor.value : "",
+        application_batch_script_save_path: applicationBatchScriptSavePath,
         allocation_mode: mode.value,
         shots: Number(shots.value),
         time_minutes: Number(timeMinutes.value),
@@ -2803,7 +2889,16 @@
       backend.value = payload.backend || "nwqsim";
       example.value = payload.example || "qiskit-simple";
       applicationSource.value = payload.application_source || "example";
+      applicationSubmissionType.value =
+        payload.application_submission_type === "sbatch" ? "sbatch" : "executable";
       applicationPath.value = payload.application_path || "";
+      applicationArguments.value = payload.application_arguments || "";
+      batchScriptEditor.value = payload.batch_script || "";
+      applicationBatchScriptSavePath =
+        payload.application_batch_script_save_path || "";
+      batchScriptPath.textContent = applicationBatchScriptSavePath
+        ? `Save beside application: ${applicationBatchScriptSavePath}`
+        : "Save path appears after preview.";
       mode.value = payload.allocation_mode || "normal";
       workload.value = payload.workload_kind || "quantum";
       shots.value = String(payload.shots || 16);
@@ -2888,10 +2983,53 @@
           method: "POST", body: JSON.stringify(formPayload()),
         });
         experimentId = payload.experiment_id;
+        setBatchScriptPreview(payload);
         saveDraft();
         previewOutput.textContent = payload.command;
       } catch (error) {
         await notifyDashboard("Preview failed", error.message, "danger");
+      }
+    });
+
+    saveBatchScript.addEventListener("click", async () => {
+      try {
+        let payload = formPayload();
+        if (!payload.batch_script.trim()) {
+          const previewPayload = await request("/api/qfw-dashboard/preview", {
+            method: "POST", body: JSON.stringify(payload),
+          });
+          setBatchScriptPreview(previewPayload);
+          payload = formPayload();
+          previewOutput.textContent = previewPayload.command;
+        }
+        batchScriptStatus.textContent = "Saving…";
+        let result;
+        try {
+          result = await request("/api/qfw-dashboard/applications/batch-script", {
+            method: "POST", body: JSON.stringify(payload),
+          });
+        } catch (error) {
+          if (error.payload?.error?.type !== "FileExistsError"
+              || !await confirmDashboardAction(
+                "Overwrite saved sbatch",
+                `${applicationBatchScriptSavePath} already exists. Overwrite it?`,
+                { severity: "warning", confirmLabel: "Overwrite" },
+              )) {
+            throw error;
+          }
+          result = await request("/api/qfw-dashboard/applications/batch-script", {
+            method: "POST",
+            body: JSON.stringify({ ...payload, overwrite: true }),
+          });
+        }
+        applicationBatchScriptSavePath = result.path || applicationBatchScriptSavePath;
+        batchScriptPath.textContent =
+          `Save beside application: ${applicationBatchScriptSavePath}`;
+        batchScriptStatus.textContent = "Saved";
+        saveDraft();
+      } catch (error) {
+        batchScriptStatus.textContent = "Save failed";
+        await notifyDashboard("SBATCH save failed", error.message, "danger");
       }
     });
 
@@ -2951,6 +3089,9 @@
                 method: "POST", body: JSON.stringify(entry.request),
               });
               entry.preview = result.command;
+              entry.request.batch_script = result.batch_script || "";
+              entry.request.application_batch_script_save_path =
+                result.application_batch_script_save_path || "";
               replaceSubmissionSet(entries);
             } catch (error) {
               await notifyDashboard("Preview failed", error.message, "danger");
@@ -3019,11 +3160,18 @@
         const result = await request("/api/qfw-dashboard/preview", {
           method: "POST", body: JSON.stringify(payload),
         });
+        setBatchScriptPreview(result);
+        const requestPayload = {
+          ...payload,
+          batch_script: payload.batch_script || result.batch_script || "",
+          application_batch_script_save_path:
+            result.application_batch_script_save_path || "",
+        };
         const draftId = window.crypto.randomUUID();
         const entries = visibleSubmissionSetEntries();
         entries.push({
           draft_id: draftId,
-          request: submissionDefinition(payload, draftId),
+          request: submissionDefinition(requestPayload, draftId),
           preview: result.command,
           status: "staged",
           execution_ids: [],

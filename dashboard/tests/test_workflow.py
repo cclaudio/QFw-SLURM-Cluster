@@ -62,8 +62,14 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     ):
         assert requirement in frontend
     assert 'application_source: applicationSource.value' in frontend
+    assert 'application_submission_type: applicationSubmissionType.value' in frontend
     assert 'application_path: applicationPath.value.trim()' in frontend
+    assert 'application_arguments: applicationArguments.value.trim()' in frontend
+    assert 'batch_script: applicationSource.value === "path"' in frontend
     assert 'application_parameters: currentApplicationParameters()' in frontend
+    assert '"Existing sbatch script"' in frontend
+    assert '"Generated sbatch"' in frontend
+    assert 'request("/api/qfw-dashboard/applications/batch-script"' in frontend
     assert "function renderApplicationParameters(values = {})" in frontend
     assert "This example has no configurable runtime parameters." in frontend
     assert '"Preview batch file"' in frontend
@@ -353,11 +359,13 @@ def test_dashboard_uses_electroboy_pane_colors() -> None:
     assert ".qfw-experiment-phase" in stylesheet
     assert ".qfw-experiment-phase.is-active" in stylesheet
     assert ".qfw-experiment-phase:focus-within" not in stylesheet
+    assert "align-content: start;" in stylesheet
     assert ".qfw-widget.is-active" in stylesheet
     assert ".qfw-widget.is-active::before" in stylesheet
     assert ".qfw-widget[open] { height: 100%; }" in stylesheet
     assert ".qfw-widget:not([open]) { align-self: start; }" in stylesheet
     assert ".qfw-resizable-text" in stylesheet
+    assert ".qfw-experiment-field select {\n  height: 2.45em;" in stylesheet
     assert "resize: vertical;" in stylesheet
     assert ".qfw-widget.has-error" in stylesheet
     assert ".qfw-widget-mirror.has-error" in stylesheet

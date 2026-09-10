@@ -53,6 +53,15 @@ def written_batch_script(cluster) -> str:
     return base64.b64decode(write_call.args[1][-1]).decode("utf-8")
 
 
+def written_script_for_path(cluster, path: str) -> str:
+    write_call = next(
+        call for call in cluster.call_args_list
+        if call.args[1][0:2] == ("python3", "-c")
+        and str(call.args[1][-3]) == path
+    )
+    return base64.b64decode(write_call.args[1][-2]).decode("utf-8")
+
+
 def test_host_action_requires_root(tmp_path) -> None:
     with pytest.raises(PermissionError, match="root"):
         service(tmp_path).submit_action("cluster-start", "user-a")
@@ -921,6 +930,94 @@ def test_custom_python_application_runs_inside_activated_qfw(tmp_path) -> None:
     assert "python3 /workspace/home/user-a/app.py" in batch
     assert "qfw-deactivate" in batch
     assert experiment.example == "custom"
+
+
+def test_custom_executable_arguments_are_quoted_in_generated_batch(tmp_path) -> None:
+    preview = service(tmp_path).preview_experiment({
+        "identity": "user-a",
+        "backend": "nwqsim",
+        "application_source": "path",
+        "application_submission_type": "executable",
+        "application_path": "/workspace/home/user-a/run_app",
+        "application_arguments": "--alpha 'two words' --count 3",
+    })
+
+    assert preview["application_batch_script_save_path"] == (
+        "/workspace/home/user-a/run_app.qfw.sbatch"
+    )
+    assert "batch_script" in preview
+    assert (
+        "/workspace/home/user-a/run_app --alpha 'two words' --count 3"
+        in preview["batch_script"]
+    )
+
+
+def test_custom_executable_submission_uses_edited_batch_script(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    edited = "#!/usr/bin/env bash\n#SBATCH --job-name=edited\n/bin/true\n"
+    experiment_id = "43645c5c-c6b5-43fc-8982-64c331dd2cd5"
+    with patch("qfw_slurm_dashboard.service.threading.Thread", ImmediateThread):
+        with patch.object(dashboard.runner, "cluster") as cluster:
+            cluster.return_value = CommandResult(("sbatch",), 0, "42\n", "")
+            experiment = dashboard.submit_experiment({
+                "experiment_id": experiment_id,
+                "identity": "user-a",
+                "backend": "nwqsim",
+                "application_source": "path",
+                "application_submission_type": "executable",
+                "application_path": "/workspace/home/user-a/app.py",
+                "batch_script": edited,
+            })
+
+    assert written_batch_script(cluster) == edited
+    assert experiment.manifest["batch_script_sha256"]
+
+
+def test_existing_sbatch_application_submits_path_directly(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    with patch("qfw_slurm_dashboard.service.threading.Thread", ImmediateThread):
+        with patch.object(dashboard.runner, "cluster") as cluster:
+            cluster.return_value = CommandResult(("sbatch",), 0, "42\n", "")
+            experiment = dashboard.submit_experiment({
+                "identity": "user-a",
+                "backend": "nwqsim",
+                "application_source": "path",
+                "application_submission_type": "sbatch",
+                "application_path": "/workspace/home/user-a/app.sbatch",
+            })
+
+    assert cluster.call_args.args[1] == (
+        "sbatch", "--parsable", "/workspace/home/user-a/app.sbatch"
+    )
+    assert not any(call.args[1][0:2] == ("python3", "-c")
+                   for call in cluster.call_args_list)
+    assert experiment.manifest["batch_script_path"] == (
+        "/workspace/home/user-a/app.sbatch"
+    )
+    assert "batch_script_sha256" not in experiment.manifest
+
+
+def test_save_application_batch_script_writes_beside_application(tmp_path) -> None:
+    dashboard = service(tmp_path)
+    script = "#!/usr/bin/env bash\n/bin/true\n"
+    with patch.object(dashboard.runner, "cluster") as cluster:
+        cluster.return_value = CommandResult(("python3",), 0, "", "")
+        result = dashboard.save_application_batch_script({
+            "identity": "user-a",
+            "backend": "nwqsim",
+            "application_source": "path",
+            "application_submission_type": "executable",
+            "application_path": "/workspace/home/user-a/app.py",
+            "batch_script": script,
+        })
+
+    assert result == {
+        "outcome": "success",
+        "path": "/workspace/home/user-a/app.qfw.sbatch",
+    }
+    assert written_script_for_path(
+        cluster, "/workspace/home/user-a/app.qfw.sbatch"
+    ) == script
 
 
 def test_tagged_driver_results_recover_reservation() -> None:

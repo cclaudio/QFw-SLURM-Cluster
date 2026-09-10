@@ -776,6 +776,7 @@
 }
 
 .qfw-experiment-field {
+  align-content: start;
   color: var(--qfw-muted);
   display: grid;
   font-size: 0.76em;
@@ -784,7 +785,14 @@
 }
 
 .qfw-experiment-field input:not([type="checkbox"]),
-.qfw-experiment-field select { width: 100%; }
+.qfw-experiment-field select,
+.qfw-experiment-field textarea { width: 100%; }
+
+.qfw-experiment-field input:not([type="checkbox"]),
+.qfw-experiment-field select {
+  height: 2.45em;
+  line-height: 1.2;
+}
 
 .qfw-experiment-field small {
   color: var(--qfw-muted);
@@ -797,8 +805,27 @@
 .qfw-application-parameters,
 .qfw-optional-requirements,
 .qfw-command-preview,
+.qfw-batch-script-actions,
+.qfw-batch-script-field,
 .qfw-experiment-actions {
   grid-column: 1 / -1;
+}
+
+.qfw-batch-script-actions {
+  align-items: center;
+  display: flex;
+  gap: 0.65em;
+}
+
+.qfw-batch-script-save-path,
+.qfw-batch-script-status {
+  color: var(--qfw-muted);
+  font-size: 0.72em;
+}
+
+.qfw-batch-script-editor {
+  border-radius: 0.55em;
+  min-height: 16em;
 }
 
 .qfw-application-parameters {

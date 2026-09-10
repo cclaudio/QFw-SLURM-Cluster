@@ -59,6 +59,9 @@ DEFW_PY_LOG_LEVEL_TOKENS = {
     "DEFW_STACKTRACE",
     "DEFW_ALL",
 }
+APPLICATION_SUBMISSION_TYPES = {"executable", "sbatch"}
+MAX_APPLICATION_ARGUMENTS_LENGTH = 8192
+MAX_EDITED_BATCH_SCRIPT_BYTES = 262144
 EXAMPLE_SCRIPTS = {
     "init-test": "qfw_init_test.sh",
     "qiskit-simple": "qfw_qiskit_simple.sh",
@@ -935,9 +938,17 @@ class DashboardService:
     ) -> tuple[str, str, str, str, dict[str, Any]]:
         identity = str(request.get("identity", default_identity))
         backend = str(request.get("backend", ""))
-        application_source, example, application_path = self._application(request)
+        application_source, example, application_path, submission_type = (
+            self._application(request)
+        )
         application_parameters = self._application_parameters(
             request, application_source, example
+        )
+        application_arguments = self._application_arguments(
+            request, application_source, submission_type
+        )
+        batch_script = self._request_batch_script(
+            request, application_source, submission_type
         )
         mode = str(request.get("allocation_mode", "normal"))
         if identity not in IDENTITIES:
@@ -1006,7 +1017,10 @@ class DashboardService:
             ),
             "application_source": application_source,
             "application_path": application_path,
+            "application_submission_type": submission_type,
+            "application_arguments": application_arguments,
             "application_parameters": application_parameters,
+            "batch_script": batch_script,
         }
         self._validate_application_capacity(example, requirements)
         if requirements["workload_kind"] not in {"quantum", "hybrid"}:
@@ -1077,12 +1091,17 @@ class DashboardService:
         return str(parsed)
 
     @staticmethod
-    def _application(request: dict[str, Any]) -> tuple[str, str, str]:
+    def _application(request: dict[str, Any]) -> tuple[str, str, str, str]:
         source = str(request.get("application_source", "example"))
         if source not in {"example", "path"}:
             raise ValueError("application_source must be example or path")
         example = str(request.get("example", "qiskit-simple"))
         path = str(request.get("application_path", "")).strip()
+        submission_type = str(
+            request.get("application_submission_type", "executable")
+        )
+        if submission_type not in APPLICATION_SUBMISSION_TYPES:
+            raise ValueError("application_submission_type must be executable or sbatch")
         if path and (
             not path.startswith("/workspace/")
             or ".." in Path(path).parts
@@ -1093,12 +1112,12 @@ class DashboardService:
         if source == "path":
             if not path:
                 raise ValueError("custom application path is required")
-            return source, "custom", path
+            return source, "custom", path, submission_type
         if example not in EXAMPLES:
             raise ValueError("unsupported QFw example")
         if example == "chemistry" and not path:
             raise ValueError("chemistry requires an absolute /workspace application path")
-        return source, example, path
+        return source, example, path, "executable"
 
     @staticmethod
     def _application_parameters(
@@ -1137,6 +1156,46 @@ class DashboardService:
                     raise ValueError(f"{name} outside permitted range")
             parameters[name] = value
         return parameters
+
+    @staticmethod
+    def _application_arguments(
+        request: dict[str, Any], source: str, submission_type: str
+    ) -> str:
+        arguments = str(request.get("application_arguments", "")).strip()
+        if not arguments:
+            return ""
+        if source != "path" or submission_type != "executable":
+            raise ValueError(
+                "application_arguments are only supported for executables"
+            )
+        if "\x00" in arguments or "\n" in arguments:
+            raise ValueError("application_arguments must be a single line")
+        if len(arguments) > MAX_APPLICATION_ARGUMENTS_LENGTH:
+            raise ValueError("application_arguments are too long")
+        try:
+            shlex.split(arguments)
+        except ValueError as error:
+            raise ValueError("invalid application_arguments") from error
+        return arguments
+
+    @staticmethod
+    def _request_batch_script(
+        request: dict[str, Any], source: str, submission_type: str
+    ) -> str:
+        script = request.get("batch_script", "")
+        if script is None:
+            script = ""
+        if not isinstance(script, str):
+            raise ValueError("batch_script must be a string")
+        if not script:
+            return ""
+        if source != "path" or submission_type != "executable":
+            raise ValueError("batch_script is only supported for executables")
+        if "\x00" in script:
+            raise ValueError("batch_script must not contain NUL bytes")
+        if len(script.encode("utf-8")) > MAX_EDITED_BATCH_SCRIPT_BYTES:
+            raise ValueError("batch_script is too large")
+        return script.replace("\r\n", "\n")
 
     @staticmethod
     def _validate_application_capacity(
@@ -1244,28 +1303,47 @@ class DashboardService:
             f"/workspace/home/{experiment.identity}/qfw-dashboard/experiments/"
             f"{experiment.experiment_id}"
         )
-        batch_path = f"{experiment_root}/job.sbatch"
         output_path = f"{experiment_root}/job.out"
-        batch_script = self._batch_script(experiment, requirements, output_path)
+        external_batch = (
+            requirements["application_source"] == "path"
+            and requirements["application_submission_type"] == "sbatch"
+        )
+        batch_path = (
+            str(requirements["application_path"])
+            if external_batch else f"{experiment_root}/job.sbatch"
+        )
+        batch_script = ""
+        if not external_batch:
+            batch_script = (
+                str(requirements.get("batch_script") or "")
+                or self._batch_script(experiment, requirements, output_path)
+            )
         submit_argv = ("sbatch", "--parsable", batch_path)
         experiment.manifest["command"] = shlex.join(submit_argv)
         experiment.manifest["batch_script_path"] = batch_path
-        experiment.manifest["batch_script_sha256"] = hashlib.sha256(
-            batch_script.encode("utf-8")
-        ).hexdigest()
+        if batch_script:
+            experiment.manifest["batch_script_sha256"] = hashlib.sha256(
+                batch_script.encode("utf-8")
+            ).hexdigest()
         experiment.manifest["output_path"] = output_path
         experiment.manifest["submitted_at"] = utc_now()
-        write_result = self._write_batch_script(
-            experiment.identity, batch_path, batch_script
-        )
-        if write_result.returncode:
-            result = write_result
-            failure_classification = "batch-script"
-        else:
+        if external_batch:
             result = self.runner.cluster(
                 experiment.identity, submit_argv, timeout=30
             )
             failure_classification = "submission"
+        else:
+            write_result = self._write_batch_script(
+                experiment.identity, batch_path, batch_script
+            )
+            if write_result.returncode:
+                result = write_result
+                failure_classification = "batch-script"
+            else:
+                result = self.runner.cluster(
+                    experiment.identity, submit_argv, timeout=30
+                )
+                failure_classification = "submission"
         if result.returncode:
             experiment.status = "failed"
             experiment.result = {
@@ -1280,7 +1358,9 @@ class DashboardService:
         else:
             experiment.slurm_job_id = result.stdout.strip().split(";")[0]
             experiment.status = "submitted"
-            experiment.artifacts = [output_path, batch_path]
+            experiment.artifacts = (
+                [batch_path] if external_batch else [output_path, batch_path]
+            )
             experiment.timeline.append({
                 "timestamp": utc_now(), "phase": "submitted",
                 "component": "slurm", "job_id": experiment.slurm_job_id,
@@ -1371,12 +1451,17 @@ class DashboardService:
         ]
         if requirements["application_source"] == "path":
             application_path = str(requirements["application_path"])
+            arguments = shlex.split(str(requirements["application_arguments"]))
             if application_path.endswith(".py"):
-                application_command = shlex.join(("python3", application_path))
+                application_command = shlex.join((
+                    "python3", application_path, *arguments
+                ))
             elif application_path.endswith(".sh"):
-                application_command = shlex.join(("bash", application_path))
+                application_command = shlex.join((
+                    "bash", application_path, *arguments
+                ))
             else:
-                application_command = shlex.quote(application_path)
+                application_command = shlex.join((application_path, *arguments))
             body.extend((
                 f"cd {shlex.quote(str(Path(application_path).parent))}",
                 application_command,
@@ -1427,6 +1512,57 @@ class DashboardService:
         return self.runner.cluster(
             identity, ("python3", "-c", writer, batch_path, encoded), timeout=15
         )
+
+    @staticmethod
+    def _application_batch_script_save_path(application_path: str) -> str:
+        path = Path(application_path)
+        name = f"{path.stem}.qfw.sbatch" if path.stem else "application.qfw.sbatch"
+        return str(path.with_name(name))
+
+    def save_application_batch_script(
+        self, request: dict[str, Any]
+    ) -> dict[str, str]:
+        identity, _backend, _example, _mode, requirements = (
+            self._validated_experiment_request(
+                request,
+                default_identity="",
+                require_hardware_confirmation=False,
+            )
+        )
+        if requirements["application_source"] != "path":
+            raise ValueError("batch scripts can only be saved for application paths")
+        if requirements["application_submission_type"] != "executable":
+            raise ValueError("only executable submissions generate a batch script")
+        batch_script = str(requirements.get("batch_script") or "")
+        if not batch_script:
+            raise ValueError("batch_script is required")
+
+        save_path = self._application_batch_script_save_path(
+            str(requirements["application_path"])
+        )
+        encoded = base64.b64encode(batch_script.encode("utf-8")).decode("ascii")
+        overwrite = "1" if request.get("overwrite") is True else "0"
+        writer = (
+            "import base64, os, pathlib, sys; "
+            "path = pathlib.Path(sys.argv[1]); "
+            "overwrite = sys.argv[3] == '1'; "
+            "path.parent.mkdir(parents=True, exist_ok=True); "
+            "data = base64.b64decode(sys.argv[2], validate=True); "
+            "sys.exit(3) if path.exists() and not overwrite else None; "
+            "temporary = path.with_suffix(path.suffix + '.new'); "
+            "temporary.write_bytes(data); "
+            "os.chmod(temporary, 0o700); temporary.replace(path)"
+        )
+        result = self.runner.cluster(
+            identity,
+            ("python3", "-c", writer, save_path, encoded, overwrite),
+            timeout=15,
+        )
+        if result.returncode == 3:
+            raise FileExistsError(save_path)
+        if result.returncode:
+            raise RuntimeError(result.stderr or result.stdout)
+        return {"outcome": "success", "path": save_path}
 
     def cancel_experiment(self, experiment_id: str, identity: str) -> None:
         matches = [
@@ -1765,14 +1901,12 @@ class DashboardService:
         return data
 
     def preview_experiment(self, request: dict[str, Any]) -> dict[str, str]:
-        experiment_id = self._experiment_id(request)
-        preview_request = {**request, "experiment_id": experiment_id}
-        return {
-            "experiment_id": experiment_id,
-            "command": self.command_preview(preview_request),
-        }
+        return self._experiment_preview(request)
 
     def command_preview(self, request: dict[str, Any]) -> str:
+        return self._experiment_preview(request)["command"]
+
+    def _experiment_preview(self, request: dict[str, Any]) -> dict[str, str]:
         identity, backend, example, mode, requirements = (
             self._validated_experiment_request(
                 request,
@@ -1786,13 +1920,44 @@ class DashboardService:
         )
         batch_path = f"{experiment_root}/job.sbatch"
         output_path = f"{experiment_root}/job.out"
-        experiment = Experiment(
-            preview_id, identity, backend, example, mode
+        external_batch = (
+            requirements["application_source"] == "path"
+            and requirements["application_submission_type"] == "sbatch"
         )
-        batch_script = self._batch_script(experiment, requirements, output_path)
-        return "\n".join((
+        if external_batch:
+            batch_path = str(requirements["application_path"])
+            return {
+                "experiment_id": preview_id,
+                "command": "\n".join((
+                    f"# Existing batch file: {batch_path}",
+                    "# Submission command: "
+                    f"{shlex.join(('sbatch', '--parsable', batch_path))}",
+                )),
+                "batch_script": "",
+                "batch_script_path": batch_path,
+                "application_batch_script_save_path": "",
+            }
+
+        experiment = Experiment(preview_id, identity, backend, example, mode)
+        batch_script = (
+            str(requirements.get("batch_script") or "")
+            or self._batch_script(experiment, requirements, output_path)
+        )
+        command = "\n".join((
             f"# Generated batch file: {batch_path}",
             f"# Submission command: {shlex.join(('sbatch', '--parsable', batch_path))}",
             "",
             batch_script,
         ))
+        save_path = ""
+        if requirements["application_source"] == "path":
+            save_path = self._application_batch_script_save_path(
+                str(requirements["application_path"])
+            )
+        return {
+            "experiment_id": preview_id,
+            "command": command,
+            "batch_script": batch_script,
+            "batch_script_path": batch_path,
+            "application_batch_script_save_path": save_path,
+        }
