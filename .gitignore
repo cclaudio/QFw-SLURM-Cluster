@@ -31,3 +31,4 @@ docker-compose.override.yml
 /shared-dir/qfw-build/
 /shared-dir/qfw-install/
 /shared-dir/qfw-venv/
+/shared-dir/qfw-site-services/

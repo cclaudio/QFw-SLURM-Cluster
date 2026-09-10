@@ -38,11 +38,12 @@ case "${command}" in
             exit 0
         fi
         mkdir -p "${dashboard_dir}/run"
-        nohup env -u PYTHONPATH "${dashboard_dir}/.venv/bin/electroboy" serve \
+        setsid env -u PYTHONPATH "${dashboard_dir}/.venv/bin/electroboy" serve \
             --root "${ELECTROBOY_SERVICE_ROOT}" \
             --state-root "${ELECTROBOY_SERVICE_STATE_ROOT}" \
             --host "${ELECTROBOY_SERVICE_HOST}" \
             --port "${ELECTROBOY_SERVICE_PORT}" \
+            < /dev/null \
             >>"${log_file}" 2>&1 &
         echo "$!" >"${pid_file}"
         sleep 1
