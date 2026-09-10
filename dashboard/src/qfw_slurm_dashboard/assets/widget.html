@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>QFw dashboard widget</title>
+  <link rel="stylesheet" href="/assets/service/css/selects.css">
+  <link rel="stylesheet" href="/assets/service/css/qfw-slurm-cluster.css">
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, system-ui, sans-serif;
+      --bg: #07111f;
+      --panel: #091e30;
+      --cyan: #5ee8ff;
+      --teal: #2df4c3;
+      --text: #dff8ff;
+      --muted: #83a9bb;
+      --line: rgb(94 232 255 / 34%);
+    }
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      height: 100vh;
+      margin: 0;
+      overflow: hidden;
+    }
+    header, .qfw-widget-toolbar {
+      align-items: center;
+      background: linear-gradient(90deg, #0d2c43, #08182a);
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      padding: 0.7rem 1rem;
+    }
+    header { justify-content: space-between; }
+    h1 { color: var(--cyan); font-size: 1.2rem; margin: 0; }
+    .context { color: var(--muted); font-size: 0.8rem; }
+    .disconnected { color: #f87171; }
+    button, input {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--text);
+      font: inherit;
+      min-height: 2.4rem;
+      padding: 0.45rem 0.7rem;
+    }
+    input { width: min(30rem, 45vw); }
+    .qfw-widget-toolbar .qfw-camera-hint {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-left: auto;
+    }
+    .qfw-widget-zoom-label {
+      color: var(--muted);
+      min-width: 3.5rem;
+      text-align: center;
+    }
+    .qfw-widget-zoom {
+      accent-color: var(--cyan);
+      cursor: pointer;
+      min-height: 1.5rem;
+      padding: 0;
+      width: 10rem;
+    }
+    .qfw-widget-viewport {
+      background-color: var(--bg);
+      background-image: linear-gradient(rgb(94 232 255 / 4%) 1px, transparent 1px),
+        linear-gradient(90deg, rgb(94 232 255 / 4%) 1px, transparent 1px),
+        radial-gradient(circle at 48% 25%, rgb(43 118 156 / 18%), transparent 42%);
+      background-size: 2rem 2rem, 2rem 2rem, auto;
+      min-height: 0;
+      overflow: hidden;
+      position: relative;
+      touch-action: none;
+    }
+    .qfw-widget-viewport.is-panning {
+      cursor: grabbing;
+      user-select: none;
+    }
+    .qfw-widget-mirror {
+      background: rgb(9 30 48 / 90%);
+      border: 1px solid var(--line);
+      left: 0;
+      max-width: none;
+      min-height: 12rem;
+      padding: 1rem;
+      position: absolute;
+      top: 0;
+      width: 72rem;
+    }
+    .qfw-widget-mirror[hidden] { display: none; }
+    .qfw-widget-mirror button,
+    .qfw-widget-mirror input,
+    .qfw-widget-mirror select {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      color: var(--text);
+      font: inherit;
+      min-height: 2.4rem;
+      padding: 0.45rem 0.7rem;
+    }
+  </style>
+</head>
+<body class="qfw-widget-window">
+  <header>
+    <h1 id="label">QFw widget</h1>
+    <span id="context" class="context">waiting for dashboard</span>
+    <button id="collapse" type="button">Collapse</button>
+  </header>
+  <div class="qfw-widget-toolbar">
+    <label>Filter <input id="filter" type="search"></label>
+    <span class="qfw-camera-hint">Wheel zoom · middle-drag pan</span>
+    <input id="zoomSlider" class="qfw-widget-zoom" type="range"
+      min="5" max="1000" step="5" value="100" aria-label="Zoom">
+    <output id="zoomLabel" class="qfw-widget-zoom-label">100%</output>
+    <button id="resetView" type="button">Reset view</button>
+  </div>
+  <main id="viewport" class="qfw-widget-viewport" aria-label="Zoomable widget canvas">
+    <section id="output" class="qfw-widget-mirror">Waiting for the dashboard data source…</section>
+  </main>
+  <script src="/assets/service/js/core/select-menu.js"></script>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const widget = params.get("widget") || "unknown";
+    const instanceId = params.get("instance_id") || widget;
+    const contextId = params.get("context_id") || "detached";
+    const channel = new BroadcastChannel(`qfw-dashboard-widget-v1:${contextId}`);
+    const label = document.getElementById("label");
+    const context = document.getElementById("context");
+    const output = document.getElementById("output");
+    const viewport = document.getElementById("viewport");
+    const filter = document.getElementById("filter");
+    const collapse = document.getElementById("collapse");
+    const zoomSlider = document.getElementById("zoomSlider");
+    const resetView = document.getElementById("resetView");
+    const zoomLabel = document.getElementById("zoomLabel");
+    const CANVAS_ZOOM_MIN = 5;
+    const CANVAS_ZOOM_MAX = 1000;
+    const controlWidgets = new Set([
+      "cluster-control", "service-control", "node-control", "cluster-access",
+    ]);
+    if (controlWidgets.has(widget)) filter.closest("label").hidden = true;
+    let lastPayload = null;
+    let lastMarkup = "";
+    let lastUpdate = 0;
+    let renderPending = false;
+    let camera = { x: 24, y: 24, scale: 1 };
+    let pan = null;
+    const activeScrollPointers = new Map();
+
+    function publishPresentation(presentation) {
+      channel.postMessage({
+        type: "presentation",
+        widget,
+        instance_id: instanceId,
+        presentation,
+      });
+    }
+
+    function applyCamera() {
+      output.style.left = `${camera.x / camera.scale}px`;
+      output.style.top = `${camera.y / camera.scale}px`;
+      output.style.zoom = String(camera.scale);
+      const percent = Math.round(camera.scale * 100);
+      zoomLabel.textContent = `${percent}%`;
+      zoomSlider.value = String(percent);
+    }
+
+    function persistCamera() {
+      publishPresentation({ popout_camera: { ...camera } });
+    }
+
+    function confirmWidgetAction(title, message, danger = false) {
+      return new Promise((resolve) => {
+        const overlay = document.createElement("div");
+        overlay.className = `qfw-notification-overlay qfw-notification-${
+          danger ? "danger" : "warning"
+        }`;
+        const dialog = document.createElement("section");
+        dialog.className = "qfw-notification-dialog";
+        dialog.setAttribute("role", "alertdialog");
+        dialog.setAttribute("aria-modal", "true");
+        const heading = document.createElement("header");
+        heading.className = "qfw-notification-header";
+        const indicator = document.createElement("span");
+        indicator.className = "qfw-notification-indicator";
+        indicator.textContent = danger ? "DANGER" : "WARNING";
+        const headingText = document.createElement("h2");
+        headingText.textContent = title;
+        heading.append(indicator, headingText);
+        const body = document.createElement("p");
+        body.className = "qfw-notification-message";
+        body.textContent = message;
+        const actions = document.createElement("footer");
+        actions.className = "qfw-notification-actions";
+        const cancel = document.createElement("button");
+        cancel.className = "qfw-notification-cancel";
+        cancel.type = "button";
+        cancel.textContent = "Cancel";
+        const confirm = document.createElement("button");
+        confirm.className = "qfw-notification-confirm";
+        confirm.type = "button";
+        confirm.textContent = "Continue";
+        actions.append(cancel, confirm);
+        dialog.append(heading, body, actions);
+        overlay.append(dialog);
+
+        function finish(accepted) {
+          document.removeEventListener("keydown", onKeyDown, true);
+          overlay.remove();
+          resolve(accepted);
+        }
+        function onKeyDown(event) {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          finish(false);
+        }
+        cancel.addEventListener("click", () => finish(false));
+        confirm.addEventListener("click", () => finish(true));
+        overlay.addEventListener("pointerdown", (event) => {
+          if (event.target === overlay) finish(false);
+        });
+        document.addEventListener("keydown", onKeyDown, true);
+        document.body.append(overlay);
+        window.requestAnimationFrame(() => confirm.focus());
+      });
+    }
+
+    function zoomAt(clientX, clientY, factor) {
+      const bounds = viewport.getBoundingClientRect();
+      const localX = clientX - bounds.left;
+      const localY = clientY - bounds.top;
+      const previous = camera.scale;
+      const next = Math.min(
+        CANVAS_ZOOM_MAX / 100,
+        Math.max(CANVAS_ZOOM_MIN / 100, previous * factor),
+      );
+      const worldX = (localX - camera.x) / previous;
+      const worldY = (localY - camera.y) / previous;
+      camera = {
+        scale: next,
+        x: localX - worldX * next,
+        y: localY - worldY * next,
+      };
+      applyCamera();
+      persistCamera();
+    }
+
+    function setZoomAt(clientX, clientY, percent) {
+      const next = Number(percent) / 100;
+      if (!Number.isFinite(next) || next <= 0) return;
+      zoomAt(clientX, clientY, next / camera.scale);
+    }
+
+    function sortableValue(value) {
+      const text = String(value ?? "").trim();
+      if (!text || text === "—") return { type: "empty", value: "" };
+      const numberText = text.replace(/,/g, "");
+      const number = Number(numberText);
+      if (/^-?\d+(?:\.\d+)?$/.test(numberText)) {
+        return { type: "number", value: number };
+      }
+      const timestamp = Date.parse(text);
+      if (Number.isFinite(timestamp) && /\d{4}-\d{2}-\d{2}/.test(text)) {
+        return { type: "date", value: timestamp };
+      }
+      return { type: "string", value: text.toLowerCase() };
+    }
+
+    function compareSortableValues(left, right) {
+      const leftValue = sortableValue(left);
+      const rightValue = sortableValue(right);
+      if (leftValue.type === "empty" && rightValue.type !== "empty") return 1;
+      if (rightValue.type === "empty" && leftValue.type !== "empty") return -1;
+      if (leftValue.type === rightValue.type
+          && ["date", "number"].includes(leftValue.type)) {
+        return leftValue.value - rightValue.value;
+      }
+      return String(leftValue.value).localeCompare(String(rightValue.value), undefined, {
+        numeric: true,
+      });
+    }
+
+    function hydrateSortableTables() {
+      output.querySelectorAll("table.qfw-table").forEach((table) => {
+        table.querySelectorAll("thead .qfw-table-sort").forEach((button) => {
+          button.addEventListener("click", () => {
+            const heading = button.closest("th");
+            const header = heading?.parentElement;
+            const body = table.tBodies[0];
+            if (!heading || !header || !body) return;
+            const column = [...header.children].indexOf(heading);
+            const direction = table.dataset.qfwSortColumn === String(column)
+              && table.dataset.qfwSortDirection !== "desc" ? "desc" : "asc";
+            table.dataset.qfwSortColumn = String(column);
+            table.dataset.qfwSortDirection = direction;
+            const multiplier = direction === "desc" ? -1 : 1;
+            const rows = [...body.rows].filter((row) =>
+              row.cells.length > column && !row.querySelector(".qfw-empty"));
+            rows.sort((left, right) => (
+              compareSortableValues(
+                left.cells[column]?.textContent || "",
+                right.cells[column]?.textContent || "",
+              ) * multiplier
+            ));
+            body.replaceChildren(...rows);
+          });
+        });
+      });
+    }
+
+    function scrollableWheelTarget(event, boundary) {
+      return event.composedPath().some((target) => {
+        if (!(target instanceof Element) || target === boundary) return false;
+        if (!boundary.contains(target)) return false;
+        const style = window.getComputedStyle(target);
+        const scrollsVertically = event.deltaY !== 0
+          && /^(auto|scroll)$/.test(style.overflowY)
+          && target.scrollHeight > target.clientHeight;
+        const scrollsHorizontally = event.deltaX !== 0
+          && /^(auto|scroll)$/.test(style.overflowX)
+          && target.scrollWidth > target.clientWidth;
+        return scrollsVertically || scrollsHorizontally;
+      });
+    }
+
+    viewport.addEventListener("wheel", (event) => {
+      if (scrollableWheelTarget(event, viewport)) return;
+      event.preventDefault();
+      zoomAt(event.clientX, event.clientY, Math.exp(-event.deltaY * 0.0015));
+    }, { passive: false });
+    viewport.addEventListener("pointerdown", (event) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      pan = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+      viewport.setPointerCapture(event.pointerId);
+      viewport.classList.add("is-panning");
+    });
+    viewport.addEventListener("pointermove", (event) => {
+      if (!pan || pan.pointerId !== event.pointerId) return;
+      camera.x += event.clientX - pan.x;
+      camera.y += event.clientY - pan.y;
+      pan.x = event.clientX;
+      pan.y = event.clientY;
+      applyCamera();
+    });
+    function finishPan(event) {
+      if (!pan || pan.pointerId !== event.pointerId) return;
+      pan = null;
+      viewport.classList.remove("is-panning");
+      persistCamera();
+    }
+    viewport.addEventListener("pointerup", finishPan);
+    viewport.addEventListener("pointercancel", finishPan);
+    viewport.addEventListener("auxclick", (event) => {
+      if (event.button === 1) event.preventDefault();
+    });
+    zoomSlider.addEventListener("input", () => {
+      const bounds = viewport.getBoundingClientRect();
+      setZoomAt(
+        bounds.left + bounds.width / 2,
+        bounds.top + bounds.height / 2,
+        Number(zoomSlider.value),
+      );
+    });
+    resetView.addEventListener("click", () => {
+      camera = { x: 24, y: 24, scale: 1 };
+      output.querySelectorAll("[data-qfw-preserve-scroll]").forEach((container) => {
+        container.style.removeProperty("height");
+        container.scrollLeft = 0;
+        container.scrollTop = 0;
+      });
+      const topologyZoom = output.querySelector(".qfw-topology-zoom");
+      const topologyZoomValue = output.querySelector(".qfw-topology-zoom-value");
+      const topologyGraph = output.querySelector(".qfw-topology-graph");
+      if (topologyZoom) topologyZoom.value = "100";
+      if (topologyZoomValue) topologyZoomValue.textContent = "100%";
+      if (topologyGraph) topologyGraph.style.width = "100%";
+      applyCamera();
+      publishPresentation({
+        popout_camera: { ...camera },
+        ...(widget === "topology" ? { zoom: 100 } : {}),
+      });
+    });
+
+    function hydrateWidget() {
+      if (widget === "topology") {
+        const projection = output.querySelector(".qfw-topology-projection");
+        const topologyFilter = output.querySelector(".qfw-topology-filter");
+        const zoom = output.querySelector(".qfw-topology-zoom");
+        const zoomValue = output.querySelector(".qfw-topology-zoom-value");
+        const graph = output.querySelector(".qfw-topology-graph");
+        projection?.addEventListener("change", () => {
+          publishPresentation({ projection: projection.value });
+        });
+        topologyFilter?.addEventListener("input", () => {
+          publishPresentation({ filter: topologyFilter.value });
+        });
+        zoom?.addEventListener("input", () => {
+          if (graph) graph.style.width = `${zoom.value}%`;
+          if (zoomValue) zoomValue.textContent = `${zoom.value}%`;
+        });
+        zoom?.addEventListener("change", () => {
+          publishPresentation({ zoom: Number(zoom.value) });
+        });
+        output.querySelectorAll(".qfw-topology-graph [data-object-id]")
+          .forEach((object) => {
+            const select = () => publishPresentation({
+              selected: object.dataset.objectId,
+            });
+            object.addEventListener("click", select);
+            object.addEventListener("keydown", (event) => {
+              if (event.key === "Enter" || event.key === " ") select();
+            });
+          });
+      }
+      if (!controlWidgets.has(widget)) return;
+      output.querySelectorAll("[data-qfw-control]").forEach((control) => {
+        control.addEventListener("change", () => {
+          publishPresentation({ [control.dataset.qfwControl]: control.value });
+        });
+      });
+      output.querySelectorAll("[data-qfw-action]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const values = Object.fromEntries(
+            [...output.querySelectorAll("[data-qfw-control]")]
+              .map((control) => [control.dataset.qfwControl, control.value]),
+          );
+          const action = button.dataset.qfwAction;
+          const description = action === "abort"
+            ? "Abort the current operation?"
+            : action === "open-shell"
+              ? `Open a shell in ${values.node || "slurmctld"}?`
+              : `Run ${values.operation || action}?`;
+          const danger = action === "abort"
+            || ["stop", "restart", "rebuild", "drain"].includes(values.operation);
+          if (values.operation !== "status"
+              && !await confirmWidgetAction("Confirm operation", description, danger)) return;
+          channel.postMessage({ type: "control-action", widget, action, values });
+        });
+      });
+    }
+
+    function captureMirrorScrollPositions() {
+      return [...output.querySelectorAll("[data-qfw-preserve-scroll]")]
+        .map((container) => ({
+          height: container.style.height,
+          left: container.scrollLeft,
+          top: container.scrollTop,
+        }));
+    }
+
+    function restoreMirrorScrollPositions(positions) {
+      const containers = output.querySelectorAll("[data-qfw-preserve-scroll]");
+      positions.forEach((position, index) => {
+        if (!containers[index]) return;
+        if (position.height) containers[index].style.height = position.height;
+        containers[index].scrollLeft = position.left;
+        containers[index].scrollTop = position.top;
+      });
+    }
+
+    function selectionIntersects(container) {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return false;
+      for (let index = 0; index < selection.rangeCount; index += 1) {
+        const range = selection.getRangeAt(index);
+        if (container.contains(range.startContainer)
+            || container.contains(range.endContainer)) return true;
+        try {
+          if (range.intersectsNode(container)) return true;
+        } catch (_error) {
+          // Detached nodes cannot intersect the current document selection.
+        }
+      }
+      return false;
+    }
+
+    function userIsInteractingWith(container) {
+      const active = document.activeElement;
+      const editing = active instanceof Element
+        && active.matches("input, textarea, select, [contenteditable=true]")
+        && container.contains(active);
+      const scrolling = [...activeScrollPointers.values()].some((target) =>
+        container.contains(target));
+      return editing || scrolling || selectionIntersects(container);
+    }
+
+    function scrollInteractionTarget(event) {
+      return event.composedPath().find((target) => {
+        if (!(target instanceof Element)) return false;
+        const style = window.getComputedStyle(target);
+        const vertical = /^(auto|scroll)$/.test(style.overflowY)
+          && target.scrollHeight > target.clientHeight;
+        const horizontal = /^(auto|scroll)$/.test(style.overflowX)
+          && target.scrollWidth > target.clientWidth;
+        return vertical || horizontal;
+      }) || null;
+    }
+
+    document.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const target = scrollInteractionTarget(event);
+      if (target) activeScrollPointers.set(event.pointerId, target);
+    }, true);
+    ["pointerup", "pointercancel", "lostpointercapture"].forEach((type) => {
+      document.addEventListener(type, (event) => {
+        activeScrollPointers.delete(event.pointerId);
+      }, true);
+    });
+
+    function render() {
+      if (userIsInteractingWith(output)) {
+        renderPending = true;
+        return;
+      }
+      renderPending = false;
+      if (!lastMarkup) {
+        output.textContent = lastPayload === null
+          ? "Waiting for the dashboard data source…"
+          : "The dashboard did not provide a rendered widget.";
+        return;
+      }
+      const scrollPositions = captureMirrorScrollPositions();
+      const template = document.createElement("template");
+      template.innerHTML = lastMarkup;
+      output.replaceChildren(template.content.cloneNode(true));
+      hydrateSortableTables();
+      hydrateWidget();
+      restoreMirrorScrollPositions(scrollPositions);
+    }
+
+    output.addEventListener("focusout", () => {
+      if (!renderPending) return;
+      window.requestAnimationFrame(render);
+    });
+
+    filter.addEventListener("input", () => {
+      render();
+      publishPresentation({ filter: filter.value });
+    });
+    collapse.addEventListener("click", () => {
+      const expanded = output.hidden;
+      output.hidden = !expanded;
+      collapse.textContent = expanded ? "Collapse" : "Expand";
+      publishPresentation({ expanded });
+    });
+    channel.addEventListener("message", (event) => {
+      const message = event.data || {};
+      if (message.type === "reset") {
+        filter.value = "";
+        output.hidden = false;
+        collapse.textContent = "Collapse";
+        camera = { x: 24, y: 24, scale: 1 };
+        output.querySelectorAll("[data-qfw-preserve-scroll]").forEach((container) => {
+          container.style.removeProperty("height");
+          container.scrollLeft = 0;
+          container.scrollTop = 0;
+        });
+        applyCamera();
+        return;
+      }
+      if (message.type !== "state" || message.instance_id !== instanceId) return;
+      label.textContent = message.label;
+      context.classList.remove("disconnected");
+      context.textContent = `${message.cluster} · ${message.identity} · ${message.freshness}`;
+      if (message.presentation?.filter !== undefined && document.activeElement !== filter) {
+        filter.value = message.presentation.filter;
+      }
+      if (message.presentation?.expanded !== undefined) {
+        output.hidden = !message.presentation.expanded;
+        collapse.textContent = message.presentation.expanded ? "Collapse" : "Expand";
+      }
+      output.classList.toggle("has-error", message.operation_failed === true);
+      const savedCamera = message.presentation?.popout_camera;
+      if (savedCamera && !pan) {
+        camera = {
+          x: Number(savedCamera.x) || 0,
+          y: Number(savedCamera.y) || 0,
+          scale: Math.min(
+            CANVAS_ZOOM_MAX / 100,
+            Math.max(CANVAS_ZOOM_MIN / 100, Number(savedCamera.scale) || 1),
+          ),
+        };
+        applyCamera();
+      }
+      lastPayload = message.payload;
+      lastMarkup = message.markup || "";
+      lastUpdate = Date.now();
+      render();
+    });
+    window.setInterval(() => {
+      if (lastUpdate && Date.now() - lastUpdate < 8000) return;
+      context.classList.add("disconnected");
+      context.textContent = "Dashboard disconnected; attempting to reconnect";
+      channel.postMessage({ type: "request", widget, instance_id: instanceId });
+    }, 2500);
+    applyCamera();
+    channel.postMessage({ type: "request", widget, instance_id: instanceId });
+    window.addEventListener("focus", () => publishPresentation({
+      focused: "external",
+    }));
+    window.addEventListener("pagehide", () => channel.close(), { once: true });
+  </script>
+</body>
+</html>

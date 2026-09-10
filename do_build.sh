@@ -7,7 +7,7 @@ ENV_FILE="${SCRIPT_DIR}/qfw-install.env"
 
 usage() {
     cat <<EOF
-Usage: $(basename "$0") [--dry-run] [--force]
+Usage: $(basename "$0") [--dry-run] [--force] [--no-cache]
 
 Build the configured container image. If ${ENV_FILE} does not exist yet,
 run ./do_configure.sh first with its default settings.
@@ -15,11 +15,13 @@ run ./do_configure.sh first with its default settings.
 Options:
   --dry-run   Print the install/bootstrap and docker build steps without running them
   --force     Stop and remove the current compose stack, then rebuild with --no-cache
+  --no-cache  Rebuild every image layer without removing containers or named volumes
 EOF
 }
 
 DRY_RUN=false
 FORCE=false
+NO_CACHE=false
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -29,6 +31,11 @@ while [ "$#" -gt 0 ]; do
             ;;
         --force)
             FORCE=true
+            NO_CACHE=true
+            shift
+            ;;
+        --no-cache)
+            NO_CACHE=true
             shift
             ;;
         -h|--help)
@@ -68,8 +75,12 @@ if ${DRY_RUN}; then
         source "${ENV_FILE}"
         set +a
         QFW_BUILD_JOBS="${QFW_BUILD_JOBS:-4}"
+        QFW_REPOSITORY="${QFW_REPOSITORY:-https://github.com/openQSE/QFw.git}"
+        QFW_REF="${QFW_REF:-main}"
+        QFW_SLURM_REPOSITORY="${QFW_SLURM_REPOSITORY:-https://github.com/openQSE/qfw-slurm.git}"
+        QFW_SLURM_REF="${QFW_SLURM_REF:-main}"
         echo "Would run:"
-        if ${FORCE}; then
+        if ${NO_CACHE}; then
             echo "  docker build \\"
             echo "    --no-cache \\"
         else
@@ -78,6 +89,10 @@ if ${DRY_RUN}; then
         echo "    -t ${IMAGE_NAME}:${IMAGE_TAG} \\"
         echo "    --build-arg SLURM_TAG=${SLURM_TAG} \\"
         echo "    --build-arg QFW_BUILD_JOBS=${QFW_BUILD_JOBS} \\"
+        echo "    --build-arg QFW_REPOSITORY=${QFW_REPOSITORY} \\"
+        echo "    --build-arg QFW_REF=${QFW_REF} \\"
+        echo "    --build-arg QFW_SLURM_REPOSITORY=${QFW_SLURM_REPOSITORY} \\"
+        echo "    --build-arg QFW_SLURM_REF=${QFW_SLURM_REF} \\"
         echo "    ${SCRIPT_DIR}"
     else
         cat <<EOF
@@ -93,21 +108,64 @@ source "${ENV_FILE}"
 set +a
 
 QFW_BUILD_JOBS="${QFW_BUILD_JOBS:-4}"
+QFW_REPOSITORY="${QFW_REPOSITORY:-https://github.com/openQSE/QFw.git}"
+QFW_REF="${QFW_REF:-main}"
+QFW_SLURM_REPOSITORY="${QFW_SLURM_REPOSITORY:-https://github.com/openQSE/qfw-slurm.git}"
+QFW_SLURM_REF="${QFW_SLURM_REF:-main}"
+
+resolve_remote_ref() {
+    local repository="$1"
+    local ref="$2"
+    local revision
+
+    if [[ "${ref}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+        printf '%s\n' "${ref}"
+        return
+    fi
+    revision="$(git ls-remote "${repository}" "${ref}" |
+        awk 'NR == 1 { print $1 }')"
+    if [ -z "${revision}" ]; then
+        echo "Unable to resolve ${ref} from ${repository}" >&2
+        exit 1
+    fi
+    printf '%s\n' "${revision}"
+}
+
+QFW_SOURCE_REVISION="$(resolve_remote_ref "${QFW_REPOSITORY}" "${QFW_REF}")"
+QFW_SLURM_SOURCE_REVISION="$(
+    resolve_remote_ref "${QFW_SLURM_REPOSITORY}" "${QFW_SLURM_REF}"
+)"
 
 echo "Building ${IMAGE_NAME}:${IMAGE_TAG} with SLURM_TAG=${SLURM_TAG}"
 echo "Building image-contained QFw with QFW_BUILD_JOBS=${QFW_BUILD_JOBS}"
+echo "Using QFw ${QFW_REF} from ${QFW_REPOSITORY}"
+echo "Using qfw-slurm ${QFW_SLURM_REF} from ${QFW_SLURM_REPOSITORY}"
+echo "Resolved QFw revision ${QFW_SOURCE_REVISION}"
+echo "Resolved qfw-slurm revision ${QFW_SLURM_SOURCE_REVISION}"
 
-if ${FORCE}; then
+if ${NO_CACHE}; then
     docker build \
         --no-cache \
         -t "${IMAGE_NAME}:${IMAGE_TAG}" \
         --build-arg "SLURM_TAG=${SLURM_TAG}" \
         --build-arg "QFW_BUILD_JOBS=${QFW_BUILD_JOBS}" \
+        --build-arg "QFW_REPOSITORY=${QFW_REPOSITORY}" \
+        --build-arg "QFW_REF=${QFW_REF}" \
+        --build-arg "QFW_SOURCE_REVISION=${QFW_SOURCE_REVISION}" \
+        --build-arg "QFW_SLURM_REPOSITORY=${QFW_SLURM_REPOSITORY}" \
+        --build-arg "QFW_SLURM_REF=${QFW_SLURM_REF}" \
+        --build-arg "QFW_SLURM_SOURCE_REVISION=${QFW_SLURM_SOURCE_REVISION}" \
         "${SCRIPT_DIR}"
 else
     docker build \
         -t "${IMAGE_NAME}:${IMAGE_TAG}" \
         --build-arg "SLURM_TAG=${SLURM_TAG}" \
         --build-arg "QFW_BUILD_JOBS=${QFW_BUILD_JOBS}" \
+        --build-arg "QFW_REPOSITORY=${QFW_REPOSITORY}" \
+        --build-arg "QFW_REF=${QFW_REF}" \
+        --build-arg "QFW_SOURCE_REVISION=${QFW_SOURCE_REVISION}" \
+        --build-arg "QFW_SLURM_REPOSITORY=${QFW_SLURM_REPOSITORY}" \
+        --build-arg "QFW_SLURM_REF=${QFW_SLURM_REF}" \
+        --build-arg "QFW_SLURM_SOURCE_REVISION=${QFW_SLURM_SOURCE_REVISION}" \
         "${SCRIPT_DIR}"
 fi

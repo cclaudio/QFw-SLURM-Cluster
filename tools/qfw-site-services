@@ -1,0 +1,749 @@
+#!/bin/bash
+
+set -uo pipefail
+
+QFW_INSTALL_PREFIX="${QFW_INSTALL_PREFIX:-/opt/openqse/qfw}"
+QFW_VENV="${QFW_VENV:-/opt/openqse/qfw-venv}"
+QFW_SHARED_ROOT="${QFW_SHARED_ROOT:-/workspace/qfw-container-base}"
+QFW_SITE_CONFIG="${QFW_SITE_CONFIG:-/etc/openqse/qfw/site.yaml}"
+QFW_SITE_RUN_ROOT="${QFW_SITE_RUN_ROOT:-/var/lib/qfw-site-services}"
+QFW_DIR_NODE="${QFW_DIR_NODE:-slurmctld}"
+QFW_NWQSIM_NODE="${QFW_NWQSIM_NODE:-nwqsim-head}"
+QFW_IQM_NODE="${QFW_IQM_NODE:-iqm-head}"
+QFW_SIMULATOR_NODES="${QFW_SIMULATOR_NODES:-nwqsim-head,nwqsim-worker-1,nwqsim-worker-2}"
+QFW_GATEWAY_HOST="${QFW_GATEWAY_HOST:-slurmctld}"
+QFW_GATEWAY_PORT="${QFW_GATEWAY_PORT:-18095}"
+QFW_GATEWAY_CONFIG="${QFW_GATEWAY_CONFIG:-/etc/openqse/qfw-slurm/gateway.yaml}"
+QFW_GATEWAY_USER="${QFW_GATEWAY_USER:-qfw-slurm}"
+QFW_GATEWAY_LOG_DIR="${QFW_GATEWAY_LOG_DIR:-/var/log/qfw-slurm-gateway}"
+QFW_SITE_START_TIMEOUT="${QFW_SITE_START_TIMEOUT:-300}"
+
+directory_run_dir="${QFW_SITE_RUN_ROOT}/directory"
+nwqsim_run_dir="${QFW_SITE_RUN_ROOT}/qpm/nwqsim"
+iqm_run_dir="${QFW_SITE_RUN_ROOT}/qpm/iqm-ornl-20q"
+gateway_run_dir="${QFW_SITE_RUN_ROOT}/gateway"
+gateway_pid_file="${gateway_run_dir}/supervisor.pid"
+gateway_log_file="${QFW_GATEWAY_LOG_DIR}/gateway.log"
+dry_run=false
+target=all
+json_status=false
+
+usage() {
+	cat <<EOF
+Usage: qfw-site-services [--dry-run] [--target TARGET] ACTION
+
+Manage the virtual cluster's administrator-owned QFw service plane.
+
+Actions:
+  start      Start the selected service or the complete service plane
+  status     Report the selected service or complete service plane
+  stop       Stop the selected service or the complete service plane
+  restart    Stop and start the selected target
+  recover    Best-effort stop, then start the selected target
+
+Options:
+  --target TARGET
+             Select all, directory, nwqsim, iqm, or gateway (default: all)
+  --json     Emit one machine-readable status document
+  --dry-run  Print the commands without executing them
+EOF
+}
+
+die() {
+	echo "qfw-site-services: $*" >&2
+	exit 1
+}
+
+quote_command() {
+	printf '%q ' "$@"
+	printf '\n'
+}
+
+run_qfw() {
+	local node="$1"
+	shift
+	if ${dry_run}; then
+		printf '%s: ' "${node}"
+		quote_command "$@"
+		return 0
+	fi
+
+	ssh -o BatchMode=yes -o ConnectTimeout=10 "root@${node}" \
+		/bin/bash -s -- \
+		"${QFW_INSTALL_PREFIX}" \
+		"${QFW_VENV}" \
+		"${QFW_SHARED_ROOT}" \
+		"${QFW_SITE_CONFIG}" \
+		"${QFW_SIMULATOR_NODES}" \
+		"$@" <<'EOF'
+set -uo pipefail
+
+qfw_prefix="$1"
+qfw_venv="$2"
+qfw_shared_root="$3"
+qfw_site_config="$4"
+qfw_simulator_nodes="$5"
+shift 5
+
+export QFW_SHARED_ROOT="${qfw_shared_root}"
+export QFW_SITE_CONFIG="${qfw_site_config}"
+export QFW_SIMULATOR_NODES="${qfw_simulator_nodes}"
+
+source "${qfw_prefix}/bin/qfw-activate" --venv "${qfw_venv}"
+"$@"
+status=$?
+qfw-deactivate >/dev/null 2>&1 || true
+exit "${status}"
+EOF
+}
+
+gateway_supervisor() {
+	local child_pid=""
+	local status=0
+
+	stop_child() {
+		trap - TERM INT
+		if [[ -n "${child_pid}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
+			kill -TERM "${child_pid}" 2>/dev/null || true
+			wait "${child_pid}" 2>/dev/null || true
+		fi
+		exit 0
+	}
+	trap stop_child TERM INT
+
+	while true; do
+		(
+			export QFW_SHARED_ROOT
+			source "${QFW_INSTALL_PREFIX}/bin/qfw-activate" \
+				--venv "${QFW_VENV}"
+			exec qfw-slurm-gateway-launch \
+				--config "${QFW_GATEWAY_CONFIG}" serve
+		) &
+		child_pid=$!
+		wait "${child_pid}"
+		status=$?
+		child_pid=""
+		printf 'qfw-slurm-gateway exited with status %s; retrying\n' \
+			"${status}" >&2
+		sleep 2
+	done
+}
+
+run_gateway() {
+	local gateway_action="$1"
+	if ${dry_run}; then
+		echo "${QFW_GATEWAY_HOST}: qfw gateway ${gateway_action}"
+		return 0
+	fi
+
+	ssh -o BatchMode=yes -o ConnectTimeout=10 \
+		"root@${QFW_GATEWAY_HOST}" \
+		/bin/bash -s -- \
+		"${gateway_action}" \
+		"${QFW_SITE_RUN_ROOT}" \
+		"${gateway_pid_file}" \
+		"${gateway_log_file}" \
+		"${QFW_GATEWAY_LOG_DIR}" \
+		"${QFW_GATEWAY_USER}" \
+		"${QFW_INSTALL_PREFIX}" \
+		"${QFW_VENV}" \
+		"${QFW_SHARED_ROOT}" \
+		"${QFW_GATEWAY_CONFIG}" \
+		"${QFW_GATEWAY_HOST}" \
+		"${QFW_GATEWAY_PORT}" <<'EOF'
+set -uo pipefail
+
+action="$1"
+run_root="$2"
+pid_file="$3"
+log_file="$4"
+log_dir="$5"
+gateway_user="$6"
+qfw_prefix="$7"
+qfw_venv="$8"
+qfw_shared_root="$9"
+shift 9
+gateway_config="$1"
+gateway_host="$2"
+gateway_port="$3"
+
+running() {
+	local pid=""
+	[[ -r "${pid_file}" ]] || return 1
+	read -r pid <"${pid_file}"
+	[[ "${pid}" =~ ^[0-9]+$ ]] || return 1
+	kill -0 "${pid}" 2>/dev/null || return 1
+	tr '\0' ' ' <"/proc/${pid}/cmdline" 2>/dev/null |
+		grep -q 'qfw-site-services __gateway-supervisor'
+}
+
+case "${action}" in
+start)
+	if running; then
+		echo "QFw Slurm gateway supervisor is already running"
+		exit 0
+	fi
+	install -d -m 0755 "${run_root}"
+	install -d -m 0755 "$(dirname "${pid_file}")"
+	install -d -o "${gateway_user}" -g "${gateway_user}" -m 0750 \
+		"${log_dir}"
+	install -d -o "${gateway_user}" -g "${gateway_user}" -m 0700 \
+		/var/lib/qfw-slurm-gateway
+	rm -f "${pid_file}"
+	setsid gosu "${gateway_user}" env \
+		HOME=/var/lib/qfw-slurm-gateway \
+		USER="${gateway_user}" \
+		LOGNAME="${gateway_user}" \
+		QFW_INSTALL_PREFIX="${qfw_prefix}" \
+		QFW_VENV="${qfw_venv}" \
+		QFW_SHARED_ROOT="${qfw_shared_root}" \
+		QFW_GATEWAY_CONFIG="${gateway_config}" \
+		/usr/local/sbin/qfw-site-services __gateway-supervisor \
+		>>"${log_file}" 2>&1 </dev/null &
+	pid=$!
+	echo "${pid}" >"${pid_file}"
+	sleep 1
+	if ! running; then
+		echo "qfw-site-services: gateway supervisor exited during startup" >&2
+		exit 1
+	fi
+	echo "QFw Slurm gateway supervisor started with PID ${pid}"
+	;;
+status)
+	if ! running; then
+		echo "not-ready"
+		exit 1
+	fi
+	if ! python3 - "${gateway_host}" "${gateway_port}" <<'PY'
+import socket
+import sys
+with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=5):
+    pass
+PY
+	then
+		echo "supervisor-running endpoint-not-ready"
+		exit 1
+	fi
+	echo "ready"
+	;;
+stop)
+	if ! running; then
+		rm -f "${pid_file}"
+		echo "QFw Slurm gateway supervisor is stopped"
+		exit 0
+	fi
+	read -r pid <"${pid_file}"
+	kill -TERM -- "-${pid}"
+	for _ in $(seq 1 50); do
+		if ! running; then
+			rm -f "${pid_file}"
+			echo "QFw Slurm gateway supervisor stopped"
+			exit 0
+		fi
+		sleep 0.1
+	done
+	kill -KILL -- "-${pid}" 2>/dev/null || true
+	rm -f "${pid_file}"
+	echo "qfw-site-services: gateway supervisor did not stop" >&2
+	exit 1
+	;;
+*)
+	echo "qfw-site-services: invalid internal gateway action" >&2
+	exit 2
+	;;
+esac
+EOF
+}
+
+gateway_ready() {
+	if ${dry_run}; then
+		echo "${QFW_GATEWAY_HOST}: test TCP ${QFW_GATEWAY_PORT}"
+		return 0
+	fi
+	ssh -o BatchMode=yes -o ConnectTimeout=10 \
+		"root@${QFW_GATEWAY_HOST}" \
+		python3 - "${QFW_GATEWAY_HOST}" "${QFW_GATEWAY_PORT}" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+with socket.create_connection((host, port), timeout=5):
+    pass
+PY
+}
+
+wait_for_gateway() {
+	local deadline=$((SECONDS + QFW_SITE_START_TIMEOUT))
+	until gateway_ready >/dev/null 2>&1; do
+		if (( SECONDS >= deadline )); then
+			return 1
+		fi
+		sleep 2
+	done
+}
+
+stop_directory() {
+	run_qfw "${QFW_DIR_NODE}" qfw-dir-svc stop \
+		--run-dir "${directory_run_dir}"
+}
+
+stop_nwqsim() {
+	run_qfw "${QFW_NWQSIM_NODE}" qfw-qpm-svc stop \
+		--run-dir "${nwqsim_run_dir}"
+}
+
+stop_iqm() {
+	run_qfw "${QFW_IQM_NODE}" qfw-qpm-svc stop \
+		--run-dir "${iqm_run_dir}"
+}
+
+start_gateway() {
+	require_directory || return 1
+	if prepare_component_start \
+		"QFw Slurm gateway" gateway_managed_ready stop_gateway; then
+		return 0
+	fi
+	run_gateway start || return 1
+	if ! wait_for_gateway; then
+		echo "qfw-site-services: gateway did not become ready" >&2
+		return 1
+	fi
+}
+
+stop_gateway() {
+	run_gateway stop
+}
+
+gateway_managed_ready() {
+	run_gateway status
+}
+
+directory_ready() {
+	run_qfw "${QFW_DIR_NODE}" qfw-dir-svc status \
+		--run-dir "${directory_run_dir}"
+}
+
+nwqsim_ready() {
+	run_qfw "${QFW_NWQSIM_NODE}" qfw-qpm-svc status \
+		--run-dir "${nwqsim_run_dir}"
+}
+
+iqm_ready() {
+	run_qfw "${QFW_IQM_NODE}" qfw-qpm-svc status \
+		--run-dir "${iqm_run_dir}"
+}
+
+require_directory() {
+	if directory_ready >/dev/null 2>&1; then
+		return 0
+	fi
+	echo "qfw-site-services: directory service must be ready" >&2
+	return 1
+}
+
+require_directory_dependents_stopped() {
+	local active=()
+
+	if ${dry_run}; then
+		return 0
+	fi
+	if nwqsim_ready >/dev/null 2>&1; then
+		active+=(nwqsim)
+	fi
+	if iqm_ready >/dev/null 2>&1; then
+		active+=(iqm)
+	fi
+	if gateway_managed_ready >/dev/null 2>&1; then
+		active+=(gateway)
+	fi
+	if (( ${#active[@]} == 0 )); then
+		return 0
+	fi
+	echo "qfw-site-services: stop directory dependents first: ${active[*]}" >&2
+	return 1
+}
+
+prepare_component_start() {
+	local label="$1"
+	local ready_function="$2"
+	local stop_function="$3"
+
+	if ${dry_run}; then
+		return 1
+	fi
+	if "${ready_function}" >/dev/null 2>&1; then
+		echo "${label} is already ready"
+		return 0
+	fi
+
+	echo "${label} is not ready; cleaning retained state before startup"
+	"${stop_function}" >/dev/null 2>&1 || true
+	return 1
+}
+
+start_directory() {
+	if prepare_component_start \
+		"Directory service" directory_ready stop_directory; then
+		return 0
+	fi
+	run_qfw "${QFW_DIR_NODE}" qfw-dir-svc start \
+		--scope site \
+		--run-dir "${directory_run_dir}" \
+		--site-config "${QFW_SITE_CONFIG}" \
+		--timeout "${QFW_SITE_START_TIMEOUT}"
+}
+
+start_nwqsim() {
+	require_directory || return 1
+	if prepare_component_start \
+		"NWQSim QPM" nwqsim_ready stop_nwqsim; then
+		return 0
+	fi
+	run_qfw "${QFW_NWQSIM_NODE}" qfw-qpm-svc start \
+		--scope site \
+		--run-dir "${nwqsim_run_dir}" \
+		--site-config "${QFW_SITE_CONFIG}" \
+		--service-id nwqsim \
+		--timeout "${QFW_SITE_START_TIMEOUT}"
+}
+
+start_iqm() {
+	require_directory || return 1
+	if prepare_component_start "IQM QPM" iqm_ready stop_iqm; then
+		return 0
+	fi
+	run_qfw "${QFW_IQM_NODE}" qfw-qpm-svc start \
+		--scope site \
+		--run-dir "${iqm_run_dir}" \
+		--site-config "${QFW_SITE_CONFIG}" \
+		--service-id iqm-ornl-20q \
+		--timeout "${QFW_SITE_START_TIMEOUT}"
+}
+
+start_services() {
+	local directory_started=false
+	local nwqsim_started=false
+	local iqm_started=false
+	local directory_was_ready=false
+	local nwqsim_was_ready=false
+	local iqm_was_ready=false
+	local gateway_was_ready=false
+
+	if ${dry_run}; then
+		echo "NWQSim simulator nodes: ${QFW_SIMULATOR_NODES}"
+	else
+		directory_ready >/dev/null 2>&1 && directory_was_ready=true
+		nwqsim_ready >/dev/null 2>&1 && nwqsim_was_ready=true
+		iqm_ready >/dev/null 2>&1 && iqm_was_ready=true
+		gateway_managed_ready >/dev/null 2>&1 && gateway_was_ready=true
+
+		# A live dependent cannot be assumed to be registered with a newly
+		# created directory incarnation. Recreate those dependents in normal
+		# shutdown order before restoring the complete service plane.
+		if ! ${directory_was_ready}; then
+			if ${gateway_was_ready}; then
+				stop_gateway || return 1
+				gateway_was_ready=false
+			fi
+			if ${iqm_was_ready}; then
+				stop_iqm || return 1
+				iqm_was_ready=false
+			fi
+			if ${nwqsim_was_ready}; then
+				stop_nwqsim || return 1
+				nwqsim_was_ready=false
+			fi
+		fi
+	fi
+
+	if ! start_directory; then
+		return 1
+	fi
+	${directory_was_ready} || directory_started=true
+
+	if ! start_nwqsim; then
+		${directory_started} && stop_directory >/dev/null 2>&1 || true
+		return 1
+	fi
+	${nwqsim_was_ready} || nwqsim_started=true
+
+	if ! start_iqm; then
+		${nwqsim_started} && stop_nwqsim >/dev/null 2>&1 || true
+		${directory_started} && stop_directory >/dev/null 2>&1 || true
+		return 1
+	fi
+	${iqm_was_ready} || iqm_started=true
+
+	if ! start_gateway; then
+		${iqm_started} && stop_iqm >/dev/null 2>&1 || true
+		${nwqsim_started} && stop_nwqsim >/dev/null 2>&1 || true
+		${directory_started} && stop_directory >/dev/null 2>&1 || true
+		return 1
+	fi
+	echo "QFw site services are ready."
+}
+
+service_status() {
+	local directory_output="" directory_status=-1
+	local nwqsim_output="" nwqsim_status=-1
+	local iqm_output="" iqm_status=-1
+	local gateway_output="" gateway_status=-1
+
+	if ${dry_run}; then
+		case "${target}" in
+		all|directory) directory_ready ;;
+		esac
+		case "${target}" in
+		all|nwqsim) nwqsim_ready ;;
+		esac
+		case "${target}" in
+		all|iqm) iqm_ready ;;
+		esac
+		case "${target}" in
+		all|gateway) gateway_managed_ready ;;
+		esac
+		return 0
+	fi
+
+	case "${target}" in
+	all|directory)
+		if directory_output="$(directory_ready 2>&1)"; then
+			directory_status=0
+		else
+			directory_status=$?
+		fi
+		;;
+	esac
+	case "${target}" in
+	all|nwqsim)
+		if nwqsim_output="$(nwqsim_ready 2>&1)"; then
+			nwqsim_status=0
+		else
+			nwqsim_status=$?
+		fi
+		;;
+	esac
+	case "${target}" in
+	all|iqm)
+		if iqm_output="$(iqm_ready 2>&1)"; then
+			iqm_status=0
+		else
+			iqm_status=$?
+		fi
+		;;
+	esac
+	case "${target}" in
+	all|gateway)
+		if gateway_output="$(gateway_managed_ready 2>&1)"; then
+			gateway_status=0
+		else
+			gateway_status=$?
+		fi
+		;;
+	esac
+
+	python3 - \
+		"${json_status}" "${target}" \
+		"${directory_status}" "${directory_output}" \
+		"${nwqsim_status}" "${nwqsim_output}" \
+		"${iqm_status}" "${iqm_output}" \
+		"${gateway_status}" "${gateway_output}" <<'PY'
+import json
+import sys
+
+json_output = sys.argv[1] == "true"
+target = sys.argv[2]
+values = {
+    "directory": ("Directory", int(sys.argv[3]), sys.argv[4]),
+    "nwqsim": ("NWQSim", int(sys.argv[5]), sys.argv[6]),
+    "iqm": ("IQM", int(sys.argv[7]), sys.argv[8]),
+    "gateway": ("Gateway", int(sys.argv[9]), sys.argv[10]),
+}
+selected = list(values) if target == "all" else [target]
+
+
+def first_document(text):
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text[start:])
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def classify(name, returncode, output):
+    if name == "gateway":
+        lines = {line.strip().lower() for line in output.splitlines()}
+        if "ready" in lines:
+            return "UP", {"state": "ready", "output": output}
+        if "not-ready" in lines or "supervisor-running endpoint-not-ready" in lines:
+            return "DOWN", {"state": "stopped", "output": output}
+        return "UNKNOWN", {
+            "state": "unknown", "return_code": returncode, "output": output,
+        }
+
+    document = first_document(output)
+    if document is None:
+        return "UNKNOWN", {
+            "state": "unknown", "return_code": returncode, "output": output,
+        }
+    state = str(document.get("state", "unknown")).lower()
+    display = {
+        "ready": "UP",
+        "stale": "DOWN",
+        "starting": "STARTING",
+        "degraded": "DOWN",
+        "error": "DOWN",
+        "not-ready": "DOWN",
+        "stopped": "DOWN",
+    }.get(state, "UNKNOWN")
+    return display, document
+
+
+services = {}
+inspection_failed = False
+for name in selected:
+    label, returncode, output = values[name]
+    display, detail = classify(name, returncode, output)
+    inspection_failed = inspection_failed or display == "UNKNOWN"
+    services[name] = {
+        "label": label,
+        "state": display.lower(),
+        "detail": detail,
+    }
+
+overall = "UNKNOWN" if inspection_failed else (
+    "UP" if all(item["state"] == "up" for item in services.values()) else "DOWN"
+)
+if json_output:
+    print(json.dumps({
+        "schema": "qfw-site-services-status-v1",
+        "state": overall.lower(),
+        "services": services,
+    }, indent=2, sort_keys=True))
+else:
+    print(f"QFw site services: {overall}")
+    print()
+    for item in services.values():
+        print(f'{item["label"]}: {item["state"].upper()}')
+
+raise SystemExit(1 if inspection_failed else 0)
+PY
+}
+
+stop_services() {
+	local status=0
+
+	stop_gateway || status=1
+	stop_iqm || status=1
+	stop_nwqsim || status=1
+	stop_directory || status=1
+	return "${status}"
+}
+
+target_status() {
+	service_status
+}
+
+start_target() {
+	case "${target}" in
+	all) start_services ;;
+	directory) start_directory ;;
+	nwqsim) start_nwqsim ;;
+	iqm) start_iqm ;;
+	gateway) start_gateway ;;
+	esac
+}
+
+stop_target() {
+	case "${target}" in
+	all) stop_services ;;
+	directory)
+		require_directory_dependents_stopped || return 1
+		stop_directory
+		;;
+	nwqsim) stop_nwqsim ;;
+	iqm) stop_iqm ;;
+	gateway) stop_gateway ;;
+	esac
+}
+
+restart_target() {
+	stop_target && start_target
+}
+
+recover_target() {
+	stop_target || true
+	start_target
+}
+
+main() {
+	local action=""
+
+	if [[ ${1:-} == "__gateway-supervisor" ]]; then
+		shift
+		gateway_supervisor "$@"
+		return $?
+	fi
+
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+		--dry-run)
+			dry_run=true
+			shift
+			;;
+		--json)
+			json_status=true
+			shift
+			;;
+		--target)
+			[[ $# -ge 2 ]] || die "--target requires a value"
+			target="$2"
+			shift 2
+			;;
+		--target=*)
+			target="${1#*=}"
+			shift
+			;;
+		-h|--help)
+			usage
+			return 0
+			;;
+		start|status|stop|restart|recover)
+			[[ -z "${action}" ]] || die "only one action may be specified"
+			action="$1"
+			shift
+			;;
+		*)
+			die "unknown argument: $1"
+			;;
+		esac
+	done
+
+	[[ -n "${action}" ]] || {
+		usage >&2
+		return 2
+	}
+	case "${target}" in
+	all|directory|nwqsim|iqm|gateway) ;;
+	*) die "unknown target: ${target}" ;;
+	esac
+	if ! ${dry_run} && [[ ${EUID} -ne 0 ]]; then
+		die "must run as root"
+	fi
+
+	case "${action}" in
+	start) start_target ;;
+	status) target_status ;;
+	stop) stop_target ;;
+	restart) restart_target ;;
+	recover) recover_target ;;
+	esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+	main "$@"
+fi

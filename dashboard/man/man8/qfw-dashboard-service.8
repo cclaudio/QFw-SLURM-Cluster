@@ -1,0 +1,22 @@
+.TH QFW-DASHBOARD-SERVICE 8 "September 2026" "QFw 0.1" "Administration"
+.SH NAME
+qfw-dashboard-service \- control the host ElectroBoy dashboard service
+.SH SYNOPSIS
+.B qfw-dashboard-service
+.BR start | stop | restart | status | logs
+.SH DESCRIPTION
+Starts and stops the dashboard's host-side ElectroBoy process. These actions
+do not implicitly start, stop, build, or recreate the Slurm cluster.
+.SH FILES
+.TP
+.I dashboard/run/environment
+Resolved host service environment.
+.TP
+.I dashboard/run/electroboy.log
+Retained service output.
+.TP
+.I dashboard/run/electroboy.pid
+Dashboard service process identifier.
+.SH SEE ALSO
+.BR qfw-dashboard (1),
+.BR qfw-dashboard-enable (8)

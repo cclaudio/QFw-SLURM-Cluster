@@ -1,13 +1,14 @@
 # [QFw]-SLURM Environment
 
 [QFw]-SLURM Environment is a Docker Compose based [Slurm] cluster for [QFw]
-development, integration testing, and profiling. It packages the heavy runtime
-stack in the image, while keeping the active [QFw] development tree on a host
-mount.
+development, integration testing, and profiling. The image is a complete QFw
+system. A host-mounted development install can override it when needed.
 
-[QFw] itself is not baked into the image. You clone it onto the host mount and
-build it inside the running cluster with `./do_qfw_build.sh`, so every node sees
-the same install and the tree being built is your own checkout.
+The environment supports two common workflows:
+
+- Run the image-contained [QFw] installation from `/opt/openqse/qfw`.
+- Mount a development [QFw] checkout at `/workspace/qfw-container-base/QFw` and
+  build or run that checkout inside the [Slurm] containers.
 
 This is not meant to model production HPC performance. It is meant to give a
 repeatable [Slurm], MPI, [libfabric], [DEFw], and [QFw] test environment.
@@ -20,6 +21,7 @@ SLURM SPANK plugin) and [QDMI] (via IQM's `iqm-qdmi` reference implementation).
 
 - [Build The Environment](#build-the-environment)
 - [Start And Use The Cluster](#start-and-use-the-cluster)
+- [Operational Recipes](docs/recipes/README.md)
 - [Build And Run QFw](#build-and-run-qfw)
 - [Running Against The IQM QPU](IQM-ACCESS.md) — credentials, remote access, hardware smoke tests
 - [Design Overview](#design-overview)
@@ -62,7 +64,8 @@ Build with an explicit host mount and image name:
   --prefix /path/to/shared-dir \
   --image-name qfw-slurm-cluster \
   --image-tag rocky10.1 \
-  --qfw-build-jobs 4
+  --qfw-build-jobs 4 \
+  --qfw-ref main
 
 ./do_build.sh
 ```
@@ -175,89 +178,100 @@ To validate the QRMI/QDMI shim (a smoke test — local routing/normalization, an
 ## Build And Run [QFw]
 
 <details open>
-<summary>Clone, build, and run [QFw]</summary>
+<summary>Use the official image installation</summary>
 
-[QFw] is not part of the image. `do_configure.sh` writes `QFW_CONTAINER_BASE`
-into `qfw-install.env` and `.env`, and Docker Compose bind-mounts that host
-directory into every [Slurm] container at:
+Every cluster image contains QFw, DEFw, the QFw Python environment, NWQ-Sim,
+TNQVM, libfabric, and their environment modulefiles. Enter `slurmctld`,
+activate QFw, and run a test without any separate build step:
+
+```bash
+./do_ssh.sh
+salloc --nodes=1 --ntasks=1 --time=00:30:00
+export QFW_SHARED_ROOT=/workspace/qfw-container-base
+export QFW_RUN_BASE_DIR="${QFW_SHARED_ROOT}/qfw-runs"
+source "${QFW_PREFIX}/bin/qfw-activate" --venv "${QFW_VENV}"
+cd "${QFW_SHARE_DIR}/examples"
+./qfw_qiskit_simple.sh 4
+qfw-deactivate
+exit  # relinquish the interactive allocation
+```
+
+`qfw-setup` reads the selected service definition and loads its declared
+modules into the managed PRTE and QPM processes. For example, NWQ-Sim loads
+`libfabric` and `nwqsim`; TNQVM loads `libfabric` and `tnqvm`. The caller does
+not need to load those modules manually.
+
+Inspect the installations directly when diagnosing the image:
+
+```bash
+module avail
+module load libfabric nwqsim
+command -v circuit_runner.nwqsim
+module unload nwqsim libfabric
+
+module load libfabric tnqvm
+command -v circuit_runner.tnqvm
+module unload tnqvm libfabric
+```
+
+</details>
+
+<details>
+<summary>Build and use a development QFw override</summary>
+
+Use this path only when you want to build a host-mounted [QFw] checkout.
+`do_configure.sh` writes `QFW_CONTAINER_BASE` into `qfw-install.env` and
+`.env`. Docker Compose bind-mounts that host directory into every [Slurm]
+container at:
 
 ```text
 /workspace/qfw-container-base
 ```
 
-`do_qfw_build.sh` builds [QFw] inside the running cluster and writes everything
-to that shared mount, so every node sees the same install:
+Create development directories only as needed. A typical layout is:
 
 ```text
 shared-dir/
-  QFw/            # your QFw checkout, cloned in step 1
-  qfw-venv/       # Python venv, created by do_qfw_build.sh
-  qfw-build/      # CMake build tree
-  qfw-install/    # install tree
+  QFw/          # optional active QFw checkout
+  qfw-venv/     # optional Python venv created inside the container
+  qfw-build/    # optional QFw build tree
+  qfw-install/  # optional QFw install tree
+  benchmarks/   # optional benchmark outputs
+  rocm/         # optional ROCm prefix for ROCm/HIP builds
 ```
 
 1. Configure the host mount and clone [QFw]:
 
 ```bash
-./do_configure.sh
+QFW_CONTAINER_BASE=/path/to/shared-dir
 
-git clone --recursive https://github.com/openQSE/QFw.git shared-dir/QFw
+./do_configure.sh --prefix "${QFW_CONTAINER_BASE}"
+
+git clone --recursive git@github.com:openQSE/QFw.git \
+  "${QFW_CONTAINER_BASE}/QFw"
 ```
 
-`do_configure.sh` defaults to `./shared-dir`. Pass `--prefix` to put the mount
-somewhere else, and clone into that directory instead.
-
-`--recursive` is required. [QFw] carries [DEFw] and the `qhw-*` packages as
-submodules and the build needs all of them. [QFw] declares those submodules over
-SSH, so without GitHub SSH access, rewrite them to HTTPS first:
-
-```bash
-git config --global url."https://github.com/".insteadOf "git@github.com:"
-```
-
-2. Start the cluster:
+2. Start the cluster, then build the shared override from the host:
 
 ```bash
 ./do_startup.sh
+./do_qfw_build.sh --clean
 ```
 
-3. Build [QFw] and [DEFw] inside `slurmctld`:
-
-```bash
-./do_qfw_build.sh
-```
-
-This creates the venv, installs [QFw]'s requirements along with the [QRMI] and
-[QDMI] Python bindings, then runs the CMake configure, build, and install. Use
-`--clean` to discard the build and install trees first, `--skip-venv` to reuse
-the existing venv, and `--jobs N` to set parallelism.
-
-4. Activate [QFw] inside a container:
+3. Enter `slurmctld`, explicitly select the override, and test it:
 
 ```bash
 ./do_ssh.sh
-
 source /workspace/qfw-container-base/qfw-install/bin/qfw-activate \
   --venv /workspace/qfw-container-base/qfw-venv
-```
-
-5. Run the [QFw] MPI smoke test:
-
-```bash
-cd /workspace/qfw-container-base/QFw/examples
+cd "${QFW_SHARE_DIR}/examples"
 ./qfw_mpi_smoke.sh
+qfw-deactivate
 ```
 
-`./qfw_shim_smoke.sh` in the same directory exercises the QRMI/QDMI shim.
-See [TESTING.md](TESTING.md) for running it against real IQM hardware.
-
-**The simulator examples do not currently run.** The CMake build no longer
-produces the [TNQVM] and [NWQ-Sim] executables that the older `qfw_build.sh`
-built, and nothing provisions them in the image, so `qfw_ghz.sh`, `qfw_qaoa.sh`,
-`qfw_supermarq.sh` and `qfw_run_all.sh` fail whichever backend you pass. This is
-tracked in [openQSE/QFw#58](https://github.com/openQSE/QFw/issues/58). The
-hardware path is unaffected, because the [QRMI]/[QDMI] shim does not use those
-backends.
+The override changes neither the official image installation nor the simulator
+modules. Building development versions of simulator dependencies is a separate,
+explicit operation described by QFw's `tools/dependencies/README.md`.
 
 </details>
 
@@ -268,18 +282,19 @@ backends.
 
 The environment has three important layers:
 
-- Host workspace: scripts, plus the QFw checkout and its venv, build, and install trees.
-- Docker image: [Slurm], [OpenMPI], [libfabric], modules, and the [QRMI] runtime.
+- Host workspace: scripts and optional mounted QFw development artifacts.
+- Docker image: [Slurm], [OpenMPI], [libfabric], modules, and image-contained [QFw].
 - Compose cluster: [Slurm] services and compute nodes using the image and mount.
 
 ```mermaid
 flowchart TB
-    host["Host workspace\nQFW_CONTAINER_BASE"] -->|bind mount| mount["/workspace/qfw-container-base\nQFw checkout, venv, build, install"]
+    host["Host workspace\nQFW_CONTAINER_BASE"] -->|bind mount| mount["/workspace/qfw-container-base\noptional QFw, venv, build, install, rocm"]
 
     subgraph img["Docker image"]
         slurm["Slurm runtime"]
         mpi["libfabric + OpenMPI/PRRTE"]
-        qrmi["/opt/qfw/qrmi\nQRMI C library + SPANK plugin"]
+        image_qfw["/opt/openqse/qfw\nQFw + DEFw"]
+        modules["libfabric, NWQ-Sim, TNQVM\nenvironment modules"]
     end
 
     subgraph cluster["Docker Compose cluster"]
@@ -296,9 +311,11 @@ flowchart TB
     mount --> ctl
     mount --> c1
     mount --> c5
-    qrmi --> ctl
-    qrmi --> c1
-    qrmi --> c5
+    image_qfw --> ctl
+    image_qfw --> c1
+    image_qfw --> c5
+    modules --> c1
+    modules --> c5
     mysql --> dbd
     dbd --> ctl
     ctl --> c1
@@ -349,32 +366,37 @@ The image builds and installs:
 - [libfabric]
 - [OpenMPI] with the bundled [PRRTE] checkout
 - OSU Micro-Benchmarks
+- [QFw] and [DEFw] under `/opt/openqse/qfw`
+- [QFw] Python venv under `/opt/openqse/qfw-venv`
+- [NWQ-Sim] under `/opt/openqse/nwqsim`
+- [TNQVM], XACC, and ExaTN under `/opt/openqse/tnqvm`
+- prebuilt [TNQVM] and [NWQ-Sim] circuit runners:
+  `circuit_runner.tnqvm` and `circuit_runner.nwqsim`
 - [QFw] build dependencies such as `cmake`, `gcc-gfortran`, `openblas-devel`,
-  `swig`, `scons`, `ninja-build`, and a pinned Rust toolchain under
+  `swig`, `ninja-build`, and a pinned Rust toolchain under
   `/opt/qfw/rust`
-- [QRMI] runtime: `libqrmi.so` and `qrmi.h` under `/opt/qfw/qrmi/`, and the
-  SLURM SPANK plugin installed into `/usr/lib64/slurm/`
-
-[QFw] itself is not in the image, and neither are the [QRMI] and [QDMI] Python
-bindings. `do_qfw_build.sh` installs those into the shared-mount venv, pinned to
-the `QRMI_VERSION` the image exports so the bindings match the C ABI it ships.
+- [QRMI] runtime: `libqrmi.so` and `qrmi.h` under `/opt/qfw/qrmi/`, the `qrmi`
+  Python wheel installed into the [QFw] venv, and the SLURM SPANK plugin
+  installed into `/usr/lib64/slurm/`
+- [QDMI] runtime: IQM's `iqm-qdmi[qiskit]` wheel installed into the [QFw]
+  venv
 
 The image-level runtime environment includes:
 
 ```text
 /opt/qfw/openmpi/bin
 /opt/qfw/libfabric/bin
-/opt/qfw/rust/cargo/bin
 /opt/qfw/openmpi/lib
 /opt/qfw/libfabric/lib
 /opt/qfw/qrmi/lib
 ```
 
-`QRMI_PREFIX` is set to `/opt/qfw/qrmi` so consumers can locate the QRMI
-headers and shared library without hard-coding the path.
+QFw activation adds the official QFw paths. Simulator and libfabric paths are
+added only to managed services by the service definition's environment module
+contract, or interactively with `module load`.
 
-`qfw-activate` is explicit. The image entrypoint does not globally source it
-because activation rewires the Python environment.
+`qfw-activate` is still explicit. The image entrypoint does not globally source
+it because activation rewires the Python environment.
 
 </details>
 
@@ -394,6 +416,7 @@ Useful options:
 ./do_configure.sh --prefix /path/to/shared-dir
 ./do_configure.sh --image ghcr.io/openqse/qfw-slurm-cluster:20260503-v1.0
 ./do_configure.sh --qfw-build-jobs 4
+./do_configure.sh --qfw-ref main
 ```
 
 `./do_build.sh` builds the configured image:
@@ -504,6 +527,8 @@ Typical interactive use:
 module use /etc/modulefiles
 module avail
 module load gcc-native/13.2 cmake openblas swig
+module load libfabric nwqsim
+module load libfabric tnqvm
 ```
 
 ROCm can be provided as an optional mounted prefix. If you need it, create and
@@ -701,61 +726,6 @@ If you only need to see what a helper would run:
 ./do_startup.sh --dry-run
 ./do_restart.sh --dry-run
 ```
-
-</details>
-
-<details>
-<summary>SELinux hosts (Fedora, RHEL, Rocky, CentOS Stream)</summary>
-
-The compose file mounts two host paths into every service, `QFW_CONTAINER_BASE`
-and `shared-dir`. On a host with SELinux enforcing, a bind mount keeps whatever
-label the host directory already carries, container processes run as
-`container_t`, and access is denied:
-
-```text
-$ podman exec -ti slurmctld ls -l /workspace/qfw-container-base
-ls: cannot open directory '/workspace/qfw-container-base': Permission denied
-```
-
-Both mounts therefore carry the `:z` suffix, which asks the container runtime to
-relabel those directories as shared container content. It is `:z` rather than
-`:Z` because eleven services mount the same two paths, and `:Z` would give each
-service a private label and lock the others out. Nothing is required on your
-side. The suffix is ignored on hosts without SELinux, so macOS, Debian, and
-Ubuntu are unaffected.
-
-This failure is worth recognising because it does not announce itself.
-`do_qfw_build.sh` looks for the [QFw] checkout with a `[ -f ]` test, and that test
-is false whether the file is missing or merely unreadable. An unlabelled mount is
-therefore reported as a missing checkout:
-
-```text
-No CMakeLists.txt in /workspace/qfw-container-base/QFw.
-This build needs a QFw checkout on the v0.1 release line or later.
-```
-
-Check that the mount is readable before going looking for a missing clone.
-
-There are two cases where `:z` is not the right tool:
-
-- Relabelling is recursive and happens in place. `QFW_CONTAINER_BASE` defaults to
-  `./shared-dir` inside this repository, which is the intended target. Do not
-  point it at your home directory or another broadly shared path.
-- The filesystem has to support extended attributes. Relabelling fails on NFS and
-  similar, so a shared directory on a network filesystem needs another approach.
-
-In either case, remove the suffix and label a repository-local directory
-yourself:
-
-```bash
-sudo semanage fcontext -a -t container_file_t "$(pwd)/shared-dir(/.*)?"
-sudo restorecon -R shared-dir
-```
-
-`chcon -Rt container_file_t shared-dir` has the same immediate effect and is
-useful for a one-off test, but it does not survive `restorecon` or a filesystem
-relabel. When it is reverted the cluster fails exactly as above, with nothing to
-connect the failure to a relabel that happened days earlier.
 
 </details>
 

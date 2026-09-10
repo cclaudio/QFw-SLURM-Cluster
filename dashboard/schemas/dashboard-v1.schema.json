@@ -1,0 +1,164 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openqse.org/schemas/qfw-dashboard-v1.schema.json",
+  "title": "QFw Slurm dashboard records",
+  "type": "object",
+  "required": ["schema", "observed_at", "health", "sources"],
+  "properties": {
+    "schema": {"const": "qfw-dashboard-v1"},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "health": {
+      "enum": ["ready", "partial", "stopped", "degraded", "unavailable"]
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": {"$ref": "#/$defs/source"}
+    },
+    "operations": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/operation"}
+    },
+    "experiments": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/experiment"}
+    },
+    "examples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "script", "backends", "hardware_risk"],
+        "properties": {
+          "name": {"type": "string"},
+          "script": {"type": "string"},
+          "backends": {
+            "type": "array",
+            "items": {"enum": ["nwqsim", "iqm"]}
+          },
+          "hardware_risk": {"type": "boolean"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["name", "status", "observed_at", "records", "error"],
+      "properties": {
+        "name": {"type": "string"},
+        "status": {"enum": ["ready", "degraded", "stopped", "unavailable"]},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "records": {"type": "array", "items": {"type": "object"}},
+        "error": {"type": "string"}
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["node", "partition", "state"],
+      "properties": {
+        "node": {"type": "string"},
+        "partition": {"type": "string"},
+        "state": {"type": "string"},
+        "reason": {"type": "string"},
+        "cpus": {"type": "string"},
+        "memory": {"type": "string"},
+        "features": {"type": "string"}
+      }
+    },
+    "service": {
+      "type": "object",
+      "properties": {
+        "service_id": {"type": "string"},
+        "runtime_id": {"type": "string"},
+        "generation": {"type": ["string", "integer"]},
+        "node": {"type": "string"},
+        "state": {"type": "string"},
+        "backend": {"type": "string"}
+      }
+    },
+    "allocation": {
+      "type": "object",
+      "properties": {
+        "job_id": {"type": ["string", "integer"]},
+        "user": {"type": "string"},
+        "state": {"type": "string"},
+        "partition": {"type": "string"},
+        "nodes": {"type": "string"},
+        "reservations": {"type": "array"}
+      }
+    },
+    "operation": {
+      "type": "object",
+      "required": ["operation_id", "action", "identity", "status"],
+      "properties": {
+        "operation_id": {"type": "string", "format": "uuid"},
+        "request_id": {"type": "string"},
+        "action": {"type": "string"},
+        "identity": {"enum": ["root", "user-a", "user-b", "user-c"]},
+        "target": {"type": "string"},
+        "status": {
+          "enum": [
+            "queued", "running", "aborting", "aborted", "succeeded", "failed"
+          ]
+        },
+        "return_code": {"type": ["integer", "null"]},
+        "output": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "experiment": {
+      "type": "object",
+      "required": ["experiment_id", "identity", "backend", "example", "status"],
+      "properties": {
+        "experiment_id": {"type": "string", "format": "uuid"},
+        "identity": {"enum": ["root", "user-a", "user-b", "user-c"]},
+        "backend": {"enum": ["nwqsim", "iqm"]},
+        "example": {"type": "string"},
+        "allocation_mode": {"enum": ["normal", "heterogeneous"]},
+        "status": {"type": "string"},
+        "slurm_job_id": {"type": "string"},
+        "reservations": {"type": "array"},
+        "result": {"type": "object"},
+        "artifacts": {"type": "array", "items": {"type": "string"}},
+        "manifest": {"type": "object"},
+        "timeline": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "progress_event": {
+      "type": "object",
+      "required": ["schema", "timestamp", "kind"],
+      "properties": {
+        "schema": {"const": "qfw-dashboard-event-v1"},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "kind": {"enum": ["progress", "log", "audit", "gap"]},
+        "component": {"type": "string"},
+        "instance": {"type": "string"},
+        "identity": {"type": "string"},
+        "node": {"type": "string"},
+        "job_id": {"type": "string"},
+        "service_id": {"type": "string"},
+        "reservation_id": {"type": "string"},
+        "experiment_id": {"type": "string"},
+        "operation_id": {"type": "string"},
+        "source_position": {"type": ["string", "integer"]},
+        "severity": {"enum": ["debug", "info", "warning", "error", "critical"]},
+        "message": {"type": "string"}
+      }
+    },
+    "log_page": {
+      "type": "object",
+      "required": ["schema", "source", "events", "cursor", "gap", "status"],
+      "properties": {
+        "schema": {"const": "qfw-dashboard-log-page-v1"},
+        "source": {"type": "string"},
+        "instance": {"type": "string"},
+        "events": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/progress_event"}
+        },
+        "cursor": {"type": "integer", "minimum": 0},
+        "gap": {"type": "boolean"},
+        "status": {"enum": ["ready", "unavailable"]},
+        "error": {"type": "string"}
+      }
+    }
+  }
+}

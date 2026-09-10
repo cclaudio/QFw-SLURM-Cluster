@@ -1,0 +1,19 @@
+.TH QFW-DASHBOARD-ENABLE 8 "September 2026" "QFw 0.1" "Administration"
+.SH NAME
+qfw-dashboard-enable \- install the optional cluster dashboard
+.SH SYNOPSIS
+.B qfw-dashboard-enable
+.RI [ --dry-run ]
+.RI [ --host " address" ]
+.RI [ --port " port" ]
+.SH DESCRIPTION
+Initializes the pinned ElectroBoy submodule when needed and installs only
+ElectroBoy core, reusable modules, and the qfw-slurm-cluster workflow in a
+dashboard-local virtual environment. Normal cluster build and startup are not
+invoked.
+.SH SECURITY
+The listener is restricted to loopback. Remote access requires a separately
+configured authenticated reverse proxy.
+.SH SEE ALSO
+.BR qfw-dashboard-service (8),
+.BR qfw-dashboard-disable (8)

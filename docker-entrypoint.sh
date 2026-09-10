@@ -58,7 +58,6 @@ ensure_munge_key() {
     chmod 0400 /etc/munge/munge.key
 }
 
-
 if [ "$1" = "TJNXXX" ]
 then
     echo "TJNXXX DBG"
@@ -114,6 +113,8 @@ fi
 if [ "$1" = "slurmctld" ]
 then
     start_sshd
+    install -d -o slurm -g slurm -m 0700 \
+        /var/lib/qfw-slurm/allocations
     ensure_munge_key
     echo "---> Starting the MUNGE Authentication service (munged) ..."
     gosu munge /usr/sbin/munged

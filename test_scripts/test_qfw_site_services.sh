@@ -1,0 +1,237 @@
+#!/bin/bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+command="${script_dir}/tools/qfw-site-services"
+temporary="$(mktemp -d)"
+trap 'rm -rf "${temporary}"' EXIT
+
+grep -q '/etc/openqse/qfw-slurm/gateway.yaml' "${command}"
+grep -q '/etc/openqse/qfw-slurm/plugin.conf' \
+	"${script_dir}/config/qfw-slurm/plugstack.conf"
+grep -q '/etc/openqse/qfw-slurm/plugin.conf' \
+	"${script_dir}/config/qfw-slurm/burst-buffer.lua.conf"
+if grep -R -q '/etc/qfw-slurm' \
+	"${script_dir}/Dockerfile" \
+	"${script_dir}/config/qfw-slurm" \
+	"${script_dir}/tools/qfw-site-services"; then
+	echo "retired qfw-slurm configuration root remains" >&2
+	exit 1
+fi
+
+"${command}" --dry-run start >"${temporary}/start.out"
+grep -q '^slurmctld: qfw-dir-svc start ' "${temporary}/start.out"
+grep -q '^nwqsim-head: qfw-qpm-svc start ' "${temporary}/start.out"
+grep -q '^iqm-head: qfw-qpm-svc start ' "${temporary}/start.out"
+grep -q '^slurmctld: qfw gateway start$' "${temporary}/start.out"
+grep -q 'nwqsim-head,nwqsim-worker-1,nwqsim-worker-2' \
+	"${temporary}/start.out"
+grep -q 'QFw site services are ready' "${temporary}/start.out"
+
+"${command}" --dry-run status >"${temporary}/status.out"
+grep -q '^slurmctld: qfw-dir-svc status ' "${temporary}/status.out"
+grep -q '^nwqsim-head: qfw-qpm-svc status ' "${temporary}/status.out"
+grep -q '^iqm-head: qfw-qpm-svc status ' "${temporary}/status.out"
+grep -q '^slurmctld: qfw gateway status$' "${temporary}/status.out"
+
+(
+	source "${command}"
+	dry_run=false
+	target=all
+	json_status=false
+	directory_ready() { echo '{"state":"stopped"}'; return 1; }
+	nwqsim_ready() { echo '{"state":"stale"}'; return 1; }
+	iqm_ready() { echo '{"state":"stale"}'; return 1; }
+	gateway_managed_ready() { echo 'not-ready'; return 1; }
+	service_status
+) >"${temporary}/health-summary.out"
+cat >"${temporary}/health-summary.expected" <<'EOF'
+QFw site services: DOWN
+
+Directory: DOWN
+NWQSim: DOWN
+IQM: DOWN
+Gateway: DOWN
+EOF
+cmp "${temporary}/health-summary.expected" "${temporary}/health-summary.out"
+
+(
+	source "${command}"
+	dry_run=false
+	target=all
+	json_status=true
+	directory_ready() { echo '{"state":"ready"}'; }
+	nwqsim_ready() { echo '{"state":"ready"}'; }
+	iqm_ready() { echo '{"state":"ready"}'; }
+	gateway_managed_ready() { echo 'ready'; }
+	service_status
+) >"${temporary}/health.json"
+python3 - "${temporary}/health.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    status = json.load(stream)
+assert status["schema"] == "qfw-site-services-status-v1"
+assert status["state"] == "up"
+assert set(status["services"]) == {"directory", "nwqsim", "iqm", "gateway"}
+PY
+
+for target in directory nwqsim iqm gateway; do
+	"${command}" --dry-run start --target "${target}" \
+		>"${temporary}/start-${target}.out"
+	"${command}" --dry-run status --target "${target}" \
+		>"${temporary}/status-${target}.out"
+	"${command}" --dry-run restart --target "${target}" \
+		>"${temporary}/restart-${target}.out"
+	"${command}" --dry-run recover --target "${target}" \
+		>"${temporary}/recover-${target}.out"
+done
+grep -q '^slurmctld: qfw-dir-svc start ' \
+	"${temporary}/start-directory.out"
+grep -q '^nwqsim-head: qfw-qpm-svc start ' \
+	"${temporary}/start-nwqsim.out"
+grep -q '^iqm-head: qfw-qpm-svc start ' \
+	"${temporary}/start-iqm.out"
+grep -q '^slurmctld: qfw gateway start$' \
+	"${temporary}/start-gateway.out"
+if "${command}" --dry-run status --target missing >/dev/null 2>&1; then
+	echo "unknown target unexpectedly succeeded" >&2
+	exit 1
+fi
+
+"${command}" --dry-run stop >"${temporary}/stop.out"
+gateway_line="$(grep -n 'qfw gateway stop$' "${temporary}/stop.out" | cut -d: -f1)"
+iqm_line="$(grep -n '^iqm-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
+nwqsim_line="$(grep -n '^nwqsim-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
+directory_line="$(grep -n '^slurmctld: qfw-dir-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
+[[ "${gateway_line}" -lt "${iqm_line}" ]]
+[[ "${iqm_line}" -lt "${nwqsim_line}" ]]
+[[ "${nwqsim_line}" -lt "${directory_line}" ]]
+
+(
+	source "${command}"
+	dry_run=false
+	directory_ready() { return 0; }
+	nwqsim_ready() { return 0; }
+	iqm_ready() { return 0; }
+	gateway_managed_ready() { return 0; }
+	run_qfw() { return 99; }
+	run_gateway() { return 99; }
+	start_services
+) >"${temporary}/already-ready.out"
+grep -q 'Directory service is already ready' "${temporary}/already-ready.out"
+grep -q 'NWQSim QPM is already ready' "${temporary}/already-ready.out"
+grep -q 'IQM QPM is already ready' "${temporary}/already-ready.out"
+grep -q 'QFw Slurm gateway is already ready' "${temporary}/already-ready.out"
+
+: >"${temporary}/non-ready.events"
+: >"${temporary}/non-ready.calls"
+(
+	source "${command}"
+	dry_run=false
+	directory_ready() { return 1; }
+	nwqsim_ready() { return 1; }
+	iqm_ready() { return 1; }
+	gateway_managed_ready() { return 1; }
+	require_directory() { return 0; }
+	wait_for_gateway() { return 0; }
+	stop_directory() { echo stop-directory >>"${temporary}/non-ready.calls"; }
+	stop_nwqsim() { echo stop-nwqsim >>"${temporary}/non-ready.calls"; }
+	stop_iqm() { echo stop-iqm >>"${temporary}/non-ready.calls"; }
+	stop_gateway() { echo stop-gateway >>"${temporary}/non-ready.calls"; }
+	run_qfw() { echo "run-qfw:$1:$2" >>"${temporary}/non-ready.calls"; }
+	run_gateway() { echo "run-gateway:$1" >>"${temporary}/non-ready.calls"; }
+	start_directory
+	start_nwqsim
+	start_iqm
+	start_gateway
+) >"${temporary}/non-ready.events"
+grep -q 'Directory service is not ready; cleaning retained state' \
+	"${temporary}/non-ready.events"
+grep -q '^stop-directory$' "${temporary}/non-ready.calls"
+grep -q 'NWQSim QPM is not ready; cleaning retained state' \
+	"${temporary}/non-ready.events"
+grep -q '^stop-nwqsim$' "${temporary}/non-ready.calls"
+grep -q 'IQM QPM is not ready; cleaning retained state' \
+	"${temporary}/non-ready.events"
+grep -q '^stop-iqm$' "${temporary}/non-ready.calls"
+grep -q 'QFw Slurm gateway is not ready; cleaning retained state' \
+	"${temporary}/non-ready.events"
+grep -q '^stop-gateway$' "${temporary}/non-ready.calls"
+[[ "$(grep -c '^run-qfw:' "${temporary}/non-ready.calls")" -eq 3 ]]
+grep -q '^run-gateway:start$' "${temporary}/non-ready.calls"
+
+(
+	source "${command}"
+	dry_run=false
+	directory_up=false
+	nwqsim_up=true
+	iqm_up=true
+	gateway_up=true
+	directory_ready() { ${directory_up}; }
+	nwqsim_ready() { ${nwqsim_up}; }
+	iqm_ready() { ${iqm_up}; }
+	gateway_managed_ready() { ${gateway_up}; }
+	stop_gateway() { echo stop-gateway; gateway_up=false; }
+	stop_iqm() { echo stop-iqm; iqm_up=false; }
+	stop_nwqsim() { echo stop-nwqsim; nwqsim_up=false; }
+	start_directory() { echo start-directory; directory_up=true; }
+	start_nwqsim() { echo start-nwqsim; nwqsim_up=true; }
+	start_iqm() { echo start-iqm; iqm_up=true; }
+	start_gateway() { echo start-gateway; gateway_up=true; }
+	stop_directory() { echo stop-directory; directory_up=false; }
+	start_services
+) >"${temporary}/partial-state.out"
+sed '/QFw site services are ready/d' "${temporary}/partial-state.out" \
+	>"${temporary}/partial-state.events"
+cat >"${temporary}/partial-state.expected" <<'EOF'
+stop-gateway
+stop-iqm
+stop-nwqsim
+start-directory
+start-nwqsim
+start-iqm
+start-gateway
+EOF
+cmp "${temporary}/partial-state.expected" "${temporary}/partial-state.events"
+
+: >"${temporary}/rollback.events"
+(
+	source "${command}"
+	dry_run=false
+	directory_up=true
+	nwqsim_up=false
+	directory_ready() { ${directory_up}; }
+	nwqsim_ready() { ${nwqsim_up}; }
+	iqm_ready() { return 1; }
+	gateway_managed_ready() { return 1; }
+	start_directory() { return 0; }
+	start_nwqsim() {
+		echo start-nwqsim >>"${temporary}/rollback.events"
+		nwqsim_up=true
+	}
+	start_iqm() {
+		echo fail-iqm >>"${temporary}/rollback.events"
+		return 1
+	}
+	stop_nwqsim() {
+		echo stop-nwqsim >>"${temporary}/rollback.events"
+		nwqsim_up=false
+	}
+	stop_directory() {
+		echo stop-directory >>"${temporary}/rollback.events"
+		directory_up=false
+	}
+	! start_services
+)
+grep -q '^start-nwqsim$' "${temporary}/rollback.events"
+grep -q '^fail-iqm$' "${temporary}/rollback.events"
+grep -q '^stop-nwqsim$' "${temporary}/rollback.events"
+if grep -q '^stop-directory$' "${temporary}/rollback.events"; then
+	echo "rollback stopped a pre-existing directory" >&2
+	exit 1
+fi
+
+echo "qfw-site-services dry-run lifecycle passed"

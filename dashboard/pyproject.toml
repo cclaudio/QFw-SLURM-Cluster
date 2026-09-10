@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qfw-slurm-cluster-dashboard"
+version = "0.1.0"
+description = "ElectroBoy workflow for the QFw virtual Slurm cluster."
+requires-python = ">=3.10"
+license = { text = "BSD-3-Clause" }
+dependencies = [
+  "electroboy-core==0.1.0",
+  "electroboy-modules==0.1.0",
+]
+
+[project.entry-points."electroboy.workflows"]
+qfw-slurm-cluster = "qfw_slurm_dashboard.plugin:workflow"
+
+[project.scripts]
+qfw-dashboard = "qfw_slurm_dashboard.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+packages = ["qfw_slurm_dashboard"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+qfw_slurm_dashboard = ["assets/*.js", "assets/*.css", "assets/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
