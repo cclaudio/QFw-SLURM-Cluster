@@ -68,6 +68,16 @@
   --qfw-line-soft: rgb(94 232 255 / 15%);
 }
 
+.qfw-dashboard select,
+.qfw-widget-window select,
+.qfw-progress-tools select {
+  --electroboy-select-picker-bg: #0a2235;
+  --electroboy-select-picker-border: rgb(94 232 255 / 34%);
+  --electroboy-select-picker-hover: rgb(23 65 84 / 95%);
+  --electroboy-select-picker-selected: rgb(31 111 139 / 95%);
+  --electroboy-select-picker-text: #dff8ff;
+}
+
 .qfw-notification-overlay {
   --qfw-notification-accent: #5ee8ff;
   align-items: center;

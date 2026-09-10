@@ -268,7 +268,9 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     popout = resources.files("qfw_slurm_dashboard").joinpath(
         "assets/widget.html"
     ).read_text(encoding="utf-8")
+    assert "/assets/service/css/selects.css" in popout
     assert "/assets/service/css/qfw-slurm-cluster.css" in popout
+    assert "/assets/service/js/core/select-menu.js" in popout
     assert "template.innerHTML = lastMarkup" in popout
     assert "JSON.stringify(lastPayload" not in popout
     assert "function hydrateWidget()" in popout
@@ -377,6 +379,8 @@ def test_dashboard_uses_electroboy_pane_colors() -> None:
     assert ".qfw-widget-filter + .qfw-popout" in stylesheet
     assert "font-weight: 400;" in stylesheet
     assert "font: inherit;" in stylesheet
+    assert "--electroboy-select-picker-bg: #0a2235;" in stylesheet
+    assert "--electroboy-select-picker-selected: rgb(31 111 139 / 95%);" in stylesheet
     assert ".qfw-dashboard select option" in stylesheet
     assert ".qfw-progress-tools select option" in stylesheet
     assert ".qfw-widget-window select option" in stylesheet

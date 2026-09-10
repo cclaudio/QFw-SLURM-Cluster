@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>QFw dashboard widget</title>
+  <link rel="stylesheet" href="/assets/service/css/selects.css">
   <link rel="stylesheet" href="/assets/service/css/qfw-slurm-cluster.css">
   <style>
     :root {
@@ -121,6 +122,7 @@
   <main id="viewport" class="qfw-widget-viewport" aria-label="Zoomable widget canvas">
     <section id="output" class="qfw-widget-mirror">Waiting for the dashboard data source…</section>
   </main>
+  <script src="/assets/service/js/core/select-menu.js"></script>
   <script>
     const params = new URLSearchParams(window.location.search);
     const widget = params.get("widget") || "unknown";
