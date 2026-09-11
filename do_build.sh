@@ -122,6 +122,20 @@ resolve_remote_ref() {
         printf '%s\n' "${ref}"
         return
     fi
+    revision="$(git ls-remote "${repository}" "refs/tags/${ref}^{}" |
+        awk 'NR == 1 { print $1 }')"
+    if [ -n "${revision}" ]; then
+        printf '%s\n' "${revision}"
+        return
+    fi
+    if [[ "${ref}" == refs/tags/* ]]; then
+        revision="$(git ls-remote "${repository}" "${ref}^{}" |
+            awk 'NR == 1 { print $1 }')"
+        if [ -n "${revision}" ]; then
+            printf '%s\n' "${revision}"
+            return
+        fi
+    fi
     revision="$(git ls-remote "${repository}" "${ref}" |
         awk 'NR == 1 { print $1 }')"
     if [ -z "${revision}" ]; then

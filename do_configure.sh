@@ -46,6 +46,10 @@ Options:
 This command prepares the mounted host workspace and writes the defaults used
 by the helper scripts and docker compose into:
   ${ENV_FILE}
+
+Release builds should pass matching QFw and qfw-slurm release tags explicitly,
+for example:
+  ./do_configure.sh --qfw-ref v0.1.0-rc.1 --qfw-slurm-ref v0.1.0-rc.1
 EOF
 }
 

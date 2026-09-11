@@ -17,13 +17,20 @@ Run from the cluster checkout:
 cd /path/to/QFw-SLURM-Cluster
 git switch release/v0.1
 
-./do_configure.sh
+./do_configure.sh \
+  --qfw-ref v0.1.0-rc.1 \
+  --qfw-slurm-ref v0.1.0-rc.1
 ./do_build.sh
 ```
 
 `do_configure.sh` records the image and shared-mount settings in
 `qfw-install.env`. `do_build.sh` installs Slurm, MUNGE, QFw, qfw-slurm,
 libfabric, Open MPI, NWQSim, and TNQVM in the image.
+
+Pass matching QFw and qfw-slurm release tags explicitly for release-candidate
+or release builds. The repository branch selects the cluster files, while
+`--qfw-ref` and `--qfw-slurm-ref` select the QFw and qfw-slurm sources cloned
+into the image.
 
 ## Start
 
