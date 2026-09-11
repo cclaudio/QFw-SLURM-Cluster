@@ -9,6 +9,10 @@ site_file="${script_dir}/config/site.yaml"
 nwqsim_runtime_file="${script_dir}/config/nwqsim-site-runtime.yaml"
 device_file="${script_dir}/config/device-access.yaml"
 credential_file="${script_dir}/config/qpu-users.json"
+slurm_conf_file="${script_dir}/slurm.conf"
+burst_buffer_conf_file="${script_dir}/config/qfw-slurm/burst_buffer.conf"
+plugstack_conf_file="${script_dir}/config/qfw-slurm/plugstack.conf"
+qfw_slurm_prefix="/opt/openqse/qfw-slurm"
 account="qfw-test"
 containers=(
 	slurmdbd slurmctld slurmrestd
@@ -24,9 +28,45 @@ die() {
 
 for path in "${user_file}" "${profile_file}" "${site_file}" \
 		"${nwqsim_runtime_file}" \
-		"${device_file}" "${credential_file}"; do
+		"${device_file}" "${credential_file}" "${slurm_conf_file}" \
+		"${burst_buffer_conf_file}" "${plugstack_conf_file}"; do
 	[[ -r "${path}" ]] || die "required file is not readable: ${path}"
 done
+
+# /etc/slurm is a persistent named volume: it is only seeded from the image
+# on first creation, so edits to slurm.conf and its companion files (e.g.
+# new NodeName entries) never reach an already-provisioned cluster on their
+# own. Reinstall them here and have slurmctld pick up the change before
+# nodes are (re)started. job_submit.lua/burst_buffer.lua ship outside this
+# repo (built into the image under qfw_slurm_prefix), so they are copied
+# from there instead of from the host.
+docker inspect slurmctld >/dev/null 2>&1 ||
+	die "container is not available: slurmctld"
+docker cp "${slurm_conf_file}" slurmctld:/tmp/qfw-provision-slurm.conf
+docker cp "${burst_buffer_conf_file}" \
+	slurmctld:/tmp/qfw-provision-burst_buffer.conf
+docker cp "${plugstack_conf_file}" slurmctld:/tmp/qfw-provision-plugstack.conf
+docker exec -i slurmctld bash -s -- "${qfw_slurm_prefix}" <<'EOF'
+set -euo pipefail
+
+qfw_slurm_prefix="$1"
+
+install -o slurm -g slurm -m 0644 \
+	/tmp/qfw-provision-slurm.conf /etc/slurm/slurm.conf
+install -o root -g root -m 0644 \
+	/tmp/qfw-provision-burst_buffer.conf /etc/slurm/burst_buffer.conf
+install -o root -g root -m 0644 \
+	/tmp/qfw-provision-plugstack.conf /etc/slurm/plugstack.conf
+install -o root -g root -m 0644 \
+	"${qfw_slurm_prefix}/share/qfw-slurm/slurm/job_submit.lua" \
+	/etc/slurm/job_submit.lua
+install -o root -g root -m 0644 \
+	"${qfw_slurm_prefix}/share/qfw-slurm/slurm/burst_buffer.lua" \
+	/etc/slurm/burst_buffer.lua
+rm -f /tmp/qfw-provision-slurm.conf /tmp/qfw-provision-burst_buffer.conf \
+	/tmp/qfw-provision-plugstack.conf
+EOF
+docker exec slurmctld scontrol reconfigure
 
 awk -F: '
 	/^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
