@@ -2230,9 +2230,34 @@
   }
 
   function submissionDefinition(payload, draftId) {
-    const definition = { ...payload, submission_entry_id: draftId };
+    const definition = {
+      ...payload,
+      ...editableBatchScriptFields(payload),
+      submission_entry_id: draftId,
+    };
     delete definition.experiment_id;
     return definition;
+  }
+
+  function allowsEditableBatchScript(payload) {
+    return payload?.application_source === "path"
+      && payload?.application_submission_type === "executable";
+  }
+
+  function editableBatchScriptFields(payload, previewPayload = {}) {
+    if (!allowsEditableBatchScript(payload)) {
+      return {
+        batch_script: "",
+        application_batch_script_save_path: "",
+      };
+    }
+    return {
+      batch_script: payload.batch_script || previewPayload.batch_script || "",
+      application_batch_script_save_path:
+        previewPayload.application_batch_script_save_path
+        || payload.application_batch_script_save_path
+        || "",
+    };
   }
 
   function trackedExperimentSubmission() {
@@ -3094,9 +3119,9 @@
                 method: "POST", body: JSON.stringify(entry.request),
               });
               entry.preview = result.command;
-              entry.request.batch_script = result.batch_script || "";
-              entry.request.application_batch_script_save_path =
-                result.application_batch_script_save_path || "";
+              Object.assign(
+                entry.request, editableBatchScriptFields(entry.request, result),
+              );
               replaceSubmissionSet(entries);
             } catch (error) {
               await notifyDashboard("Preview failed", error.message, "danger");
@@ -3168,9 +3193,7 @@
         setBatchScriptPreview(result);
         const requestPayload = {
           ...payload,
-          batch_script: payload.batch_script || result.batch_script || "",
-          application_batch_script_save_path:
-            result.application_batch_script_save_path || "",
+          ...editableBatchScriptFields(payload, result),
         };
         const draftId = window.crypto.randomUUID();
         const entries = visibleSubmissionSetEntries();
@@ -3220,7 +3243,7 @@
         entry.status = "submitting";
         delete entry.error;
         return {
-          ...entry.request,
+          ...submissionDefinition(entry.request, entry.draft_id),
           identity: activeIdentity,
           submission_entry_id: entry.draft_id,
           experiment_id: experimentId,

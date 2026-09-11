@@ -66,6 +66,10 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert 'application_path: applicationPath.value.trim()' in frontend
     assert 'application_arguments: applicationArguments.value.trim()' in frontend
     assert 'batch_script: applicationSource.value === "path"' in frontend
+    assert "function allowsEditableBatchScript(payload)" in frontend
+    assert "function editableBatchScriptFields(payload, previewPayload = {})" in frontend
+    assert "...editableBatchScriptFields(payload, result)" in frontend
+    assert "...submissionDefinition(entry.request, entry.draft_id)" in frontend
     assert 'application_parameters: currentApplicationParameters()' in frontend
     assert '"Existing sbatch script"' in frontend
     assert '"Generated sbatch"' in frontend
