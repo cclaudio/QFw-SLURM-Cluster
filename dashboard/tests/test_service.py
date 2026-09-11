@@ -354,6 +354,23 @@ def test_service_partition_cannot_be_used_for_application(tmp_path) -> None:
         })
 
 
+def test_backend_catalog_drives_batch_script_qpu_and_provider(tmp_path) -> None:
+    shim_preview = service(tmp_path).command_preview({
+        "identity": "user-a",
+        "backend": "shim",
+        "submit_real_hardware": True,
+    })
+    assert "#SBATCH --qpu=ornl-shim-20q" in shim_preview
+    assert "--backend shim" in shim_preview
+
+    fake_iqm_preview = service(tmp_path).command_preview({
+        "identity": "user-a",
+        "backend": "fake-iqm",
+    })
+    assert "#SBATCH --qpu=fake-iqm-20q" in fake_iqm_preview
+    assert "--backend fake-iqm" in fake_iqm_preview
+
+
 def test_submission_writes_and_submits_batch_file(tmp_path) -> None:
     dashboard = service(tmp_path)
     experiment_id = "c0a4a796-756d-45e7-9f31-ef933af72aa1"
@@ -728,6 +745,8 @@ def test_regular_shell_cannot_target_service_node(tmp_path) -> None:
         service(tmp_path).shell_context("user-a", "iqm-head")
     with pytest.raises(PermissionError, match="service-node"):
         service(tmp_path).shell_context("user-a", "shim-head")
+    with pytest.raises(PermissionError, match="service-node"):
+        service(tmp_path).shell_context("user-a", "fake-iqm-head")
 
 
 def test_experiment_archive_contains_manifest_and_all_artifacts(tmp_path) -> None:

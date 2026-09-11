@@ -11,6 +11,7 @@ QFW_DIR_NODE="${QFW_DIR_NODE:-slurmctld}"
 QFW_NWQSIM_NODE="${QFW_NWQSIM_NODE:-nwqsim-head}"
 QFW_IQM_NODE="${QFW_IQM_NODE:-iqm-head}"
 QFW_SHIM_NODE="${QFW_SHIM_NODE:-shim-head}"
+QFW_FAKE_IQM_NODE="${QFW_FAKE_IQM_NODE:-fake-iqm-head}"
 QFW_SIMULATOR_NODES="${QFW_SIMULATOR_NODES:-nwqsim-head,nwqsim-worker-1,nwqsim-worker-2}"
 QFW_GATEWAY_HOST="${QFW_GATEWAY_HOST:-slurmctld}"
 QFW_GATEWAY_PORT="${QFW_GATEWAY_PORT:-18095}"
@@ -23,6 +24,7 @@ directory_run_dir="${QFW_SITE_RUN_ROOT}/directory"
 nwqsim_run_dir="${QFW_SITE_RUN_ROOT}/qpm/nwqsim"
 iqm_run_dir="${QFW_SITE_RUN_ROOT}/qpm/iqm-ornl-20q"
 shim_run_dir="${QFW_SITE_RUN_ROOT}/qpm/shim-ornl-20q"
+fake_iqm_run_dir="${QFW_SITE_RUN_ROOT}/qpm/fake-iqm"
 gateway_run_dir="${QFW_SITE_RUN_ROOT}/gateway"
 gateway_pid_file="${gateway_run_dir}/supervisor.pid"
 gateway_log_file="${QFW_GATEWAY_LOG_DIR}/gateway.log"
@@ -45,7 +47,7 @@ Actions:
 
 Options:
   --target TARGET
-             Select all, directory, nwqsim, iqm, shim, or gateway
+             Select all, directory, nwqsim, iqm, shim, fake-iqm, or gateway
              (default: all)
   --json     Emit one machine-readable status document
   --dry-run  Print the commands without executing them
@@ -306,6 +308,11 @@ stop_shim() {
 		--run-dir "${shim_run_dir}"
 }
 
+stop_fake_iqm() {
+	run_qfw "${QFW_FAKE_IQM_NODE}" qfw-qpm-svc stop \
+		--run-dir "${fake_iqm_run_dir}"
+}
+
 start_gateway() {
 	require_directory || return 1
 	if prepare_component_start \
@@ -347,6 +354,11 @@ shim_ready() {
 		--run-dir "${shim_run_dir}"
 }
 
+fake_iqm_ready() {
+	run_qfw "${QFW_FAKE_IQM_NODE}" qfw-qpm-svc status \
+		--run-dir "${fake_iqm_run_dir}"
+}
+
 require_directory() {
 	if directory_ready >/dev/null 2>&1; then
 		return 0
@@ -369,6 +381,9 @@ require_directory_dependents_stopped() {
 	fi
 	if shim_ready >/dev/null 2>&1; then
 		active+=(shim)
+	fi
+	if fake_iqm_ready >/dev/null 2>&1; then
+		active+=(fake-iqm)
 	fi
 	if gateway_managed_ready >/dev/null 2>&1; then
 		active+=(gateway)
@@ -450,15 +465,31 @@ start_shim() {
 		--timeout "${QFW_SITE_START_TIMEOUT}"
 }
 
+start_fake_iqm() {
+	require_directory || return 1
+	if prepare_component_start \
+			"Fake IQM QPM" fake_iqm_ready stop_fake_iqm; then
+		return 0
+	fi
+	run_qfw "${QFW_FAKE_IQM_NODE}" qfw-qpm-svc start \
+		--scope site \
+		--run-dir "${fake_iqm_run_dir}" \
+		--site-config "${QFW_SITE_CONFIG}" \
+		--service-id fake-iqm \
+		--timeout "${QFW_SITE_START_TIMEOUT}"
+}
+
 start_services() {
 	local directory_started=false
 	local nwqsim_started=false
 	local iqm_started=false
 	local shim_started=false
+	local fake_iqm_started=false
 	local directory_was_ready=false
 	local nwqsim_was_ready=false
 	local iqm_was_ready=false
 	local shim_was_ready=false
+	local fake_iqm_was_ready=false
 	local gateway_was_ready=false
 
 	if ${dry_run}; then
@@ -468,6 +499,7 @@ start_services() {
 		nwqsim_ready >/dev/null 2>&1 && nwqsim_was_ready=true
 		iqm_ready >/dev/null 2>&1 && iqm_was_ready=true
 		shim_ready >/dev/null 2>&1 && shim_was_ready=true
+		fake_iqm_ready >/dev/null 2>&1 && fake_iqm_was_ready=true
 		gateway_managed_ready >/dev/null 2>&1 && gateway_was_ready=true
 
 		# A live dependent cannot be assumed to be registered with a newly
@@ -477,6 +509,10 @@ start_services() {
 			if ${gateway_was_ready}; then
 				stop_gateway || return 1
 				gateway_was_ready=false
+			fi
+			if ${fake_iqm_was_ready}; then
+				stop_fake_iqm || return 1
+				fake_iqm_was_ready=false
 			fi
 			if ${shim_was_ready}; then
 				stop_shim || return 1
@@ -519,7 +555,17 @@ start_services() {
 	fi
 	${shim_was_ready} || shim_started=true
 
+	if ! start_fake_iqm; then
+		${shim_started} && stop_shim >/dev/null 2>&1 || true
+		${iqm_started} && stop_iqm >/dev/null 2>&1 || true
+		${nwqsim_started} && stop_nwqsim >/dev/null 2>&1 || true
+		${directory_started} && stop_directory >/dev/null 2>&1 || true
+		return 1
+	fi
+	${fake_iqm_was_ready} || fake_iqm_started=true
+
 	if ! start_gateway; then
+		${fake_iqm_started} && stop_fake_iqm >/dev/null 2>&1 || true
 		${shim_started} && stop_shim >/dev/null 2>&1 || true
 		${iqm_started} && stop_iqm >/dev/null 2>&1 || true
 		${nwqsim_started} && stop_nwqsim >/dev/null 2>&1 || true
@@ -534,6 +580,7 @@ service_status() {
 	local nwqsim_output="" nwqsim_status=-1
 	local iqm_output="" iqm_status=-1
 	local shim_output="" shim_status=-1
+	local fake_iqm_output="" fake_iqm_status=-1
 	local gateway_output="" gateway_status=-1
 
 	if ${dry_run}; then
@@ -548,6 +595,9 @@ service_status() {
 		esac
 		case "${target}" in
 		all|shim) shim_ready ;;
+		esac
+		case "${target}" in
+		all|fake-iqm) fake_iqm_ready ;;
 		esac
 		case "${target}" in
 		all|gateway) gateway_managed_ready ;;
@@ -592,6 +642,15 @@ service_status() {
 		;;
 	esac
 	case "${target}" in
+	all|fake-iqm)
+		if fake_iqm_output="$(fake_iqm_ready 2>&1)"; then
+			fake_iqm_status=0
+		else
+			fake_iqm_status=$?
+		fi
+		;;
+	esac
+	case "${target}" in
 	all|gateway)
 		if gateway_output="$(gateway_managed_ready 2>&1)"; then
 			gateway_status=0
@@ -607,6 +666,7 @@ service_status() {
 		"${nwqsim_status}" "${nwqsim_output}" \
 		"${iqm_status}" "${iqm_output}" \
 		"${shim_status}" "${shim_output}" \
+		"${fake_iqm_status}" "${fake_iqm_output}" \
 		"${gateway_status}" "${gateway_output}" <<'PY'
 import json
 import sys
@@ -618,7 +678,8 @@ values = {
     "nwqsim": ("NWQSim", int(sys.argv[5]), sys.argv[6]),
     "iqm": ("IQM", int(sys.argv[7]), sys.argv[8]),
     "shim": ("Shim", int(sys.argv[9]), sys.argv[10]),
-    "gateway": ("Gateway", int(sys.argv[11]), sys.argv[12]),
+    "fake-iqm": ("Fake IQM", int(sys.argv[11]), sys.argv[12]),
+    "gateway": ("Gateway", int(sys.argv[13]), sys.argv[14]),
 }
 selected = list(values) if target == "all" else [target]
 
@@ -698,6 +759,7 @@ stop_services() {
 	local status=0
 
 	stop_gateway || status=1
+	stop_fake_iqm || status=1
 	stop_shim || status=1
 	stop_iqm || status=1
 	stop_nwqsim || status=1
@@ -716,6 +778,7 @@ start_target() {
 	nwqsim) start_nwqsim ;;
 	iqm) start_iqm ;;
 	shim) start_shim ;;
+	fake-iqm) start_fake_iqm ;;
 	gateway) start_gateway ;;
 	esac
 }
@@ -730,6 +793,7 @@ stop_target() {
 	nwqsim) stop_nwqsim ;;
 	iqm) stop_iqm ;;
 	shim) stop_shim ;;
+	fake-iqm) stop_fake_iqm ;;
 	gateway) stop_gateway ;;
 	esac
 }
@@ -791,7 +855,7 @@ main() {
 		return 2
 	}
 	case "${target}" in
-	all|directory|nwqsim|iqm|shim|gateway) ;;
+	all|directory|nwqsim|iqm|shim|fake-iqm|gateway) ;;
 	*) die "unknown target: ${target}" ;;
 	esac
 	if ! ${dry_run} && [[ ${EUID} -ne 0 ]]; then

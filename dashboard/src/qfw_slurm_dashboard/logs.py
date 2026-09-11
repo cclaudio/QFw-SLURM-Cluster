@@ -74,6 +74,16 @@ SOURCES = {
         "/var/lib/qfw-site-services/qpm/shim-ornl-20q/services/"
         "shim-ornl-20q/logs/defw_py.log",
     ),
+    "fake-iqm-qpm": LogSource(
+        "qpmd", "fake-iqm", "fake-iqm-head",
+        "/var/lib/qfw-site-services/qpm/fake-iqm/services/"
+        "fake-iqm/logs/defw_py.log",
+    ),
+    "fake-iqm-provider": LogSource(
+        "provider", "fake-iqm", "fake-iqm-head",
+        "/var/lib/qfw-site-services/qpm/fake-iqm/services/"
+        "fake-iqm/logs/defw_py.log",
+    ),
 }
 
 
@@ -176,6 +186,29 @@ SERVICE_DIAGNOSTICS = {
                        "shim-ornl-20q/service-ready.json"),
         DiagnosticFile("state/service-plane.json", "shim-head",
                        "/var/lib/qfw-site-services/qpm/shim-ornl-20q/state/"
+                       "service-plane.json"),
+    ),
+    "fake-iqm": (
+        DiagnosticFile("logs/defw_py.log", "fake-iqm-head",
+                       "/var/lib/qfw-site-services/qpm/fake-iqm/services/"
+                       "fake-iqm/logs/defw_py.log"),
+        DiagnosticFile("logs/defw_out.log", "fake-iqm-head",
+                       "/var/lib/qfw-site-services/qpm/fake-iqm/services/"
+                       "fake-iqm/logs/defw_out.log"),
+        DiagnosticFile("logs/stdout.log", "fake-iqm-head",
+                       "/var/lib/qfw-site-services/qpm/fake-iqm/services/"
+                       "fake-iqm/logs/fake-iqm.stdout.log"),
+        DiagnosticFile("logs/stderr.log", "fake-iqm-head",
+                       "/var/lib/qfw-site-services/qpm/fake-iqm/services/"
+                       "fake-iqm/logs/fake-iqm.stderr.log"),
+        DiagnosticFile("state/ready.json", "fake-iqm-head",
+                       "/var/lib/qfw-site-services/qpm/fake-iqm/services/"
+                       "fake-iqm/ready.json"),
+        DiagnosticFile("state/service-ready.json", "fake-iqm-head",
+                       "/var/lib/qfw-site-services/qpm/fake-iqm/services/"
+                       "fake-iqm/service-ready.json"),
+        DiagnosticFile("state/service-plane.json", "fake-iqm-head",
+                       "/var/lib/qfw-site-services/qpm/fake-iqm/state/"
                        "service-plane.json"),
     ),
 }

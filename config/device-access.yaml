@@ -4,3 +4,6 @@ qpus:
     provider-device-id: default
     url: https://qccsw.ccs.ornl.gov/
     credential-db: qpu-users.json
+  fake-iqm-20q:
+    provider: fake-iqm
+    provider-device-id: fake-iqm-20q

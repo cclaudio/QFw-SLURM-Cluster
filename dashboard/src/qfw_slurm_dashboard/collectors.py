@@ -213,7 +213,9 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
     payload = _first_json_object(output) or {}
     services = payload.get("services") or {}
     records: list[dict[str, Any]] = []
-    for component in ("directory", "nwqsim", "iqm", "shim", "gateway"):
+    for component in (
+        "directory", "nwqsim", "iqm", "shim", "fake-iqm", "gateway",
+    ):
         entry = services.get(component) or {}
         document = entry.get("detail") if isinstance(entry, dict) else {}
         document = document if isinstance(document, dict) else {}
@@ -222,6 +224,7 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
             "nwqsim": "qpm:nwqsim",
             "iqm": "qpm:iqm-ornl-20q",
             "shim": "qpm:shim-ornl-20q",
+            "fake-iqm": "qpm:fake-iqm",
         }.get(component)
         managed = document.get("components", {}).get(component_key, {}) \
             if component_key else {}
@@ -241,6 +244,7 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
                 "nwqsim": "nwqsim",
                 "iqm": "iqm-ornl-20q",
                 "shim": "shim-ornl-20q",
+                "fake-iqm": "fake-iqm",
                 "gateway": "qfw-slurm-gateway",
             }[component],
             "node": managed.get("node", "slurmctld" if component in {
@@ -252,6 +256,7 @@ def service_plane_status(runner: CommandRunner) -> SourceState:
                 "nwqsim": "NWQSim",
                 "iqm": "IQM",
                 "shim": "Shim",
+                "fake-iqm": "Fake IQM",
                 "gateway": "QSGP",
             }[component],
             "active_reservations": "—",
@@ -293,7 +298,9 @@ def reconcile_qpm_registration(
     records: list[dict[str, Any]] = []
     for original in service_plane.records:
         record = dict(original)
-        if record.get("component") not in {"nwqsim", "iqm", "shim"}:
+        if record.get("component") not in {
+            "nwqsim", "iqm", "shim", "fake-iqm",
+        }:
             records.append(record)
             continue
         process_state = str(record.get("state", "stopped")).lower()
@@ -361,6 +368,7 @@ def service_health_summary(
         "nwqsim": "NWQSim",
         "iqm": "IQM",
         "shim": "Shim",
+        "fake-iqm": "Fake IQM",
         "gateway": "Gateway",
     }
     selected = list(labels) if target == "all" else [target]
@@ -457,6 +465,13 @@ def diagnostics(runner: CommandRunner) -> SourceState:
             ),
         ),
         (
+            "fake-iqm-device-readiness", "fake-iqm-head",
+            (
+                "bash", "-lc",
+                "test -r /etc/openqse/qfw/device/device-access.yaml",
+            ),
+        ),
+        (
             "directory-connection-record", "slurmctld",
             (
                 "test", "-s",
@@ -503,7 +518,9 @@ def diagnostics(runner: CommandRunner) -> SourceState:
             }
         )
     clock_values = []
-    for container in ("c1", "nwqsim-head", "iqm-head", "shim-head"):
+    for container in (
+        "c1", "nwqsim-head", "iqm-head", "shim-head", "fake-iqm-head",
+    ):
         try:
             result = runner.cluster("root", (
                 "bash", "-lc",
@@ -530,7 +547,7 @@ def diagnostics(runner: CommandRunner) -> SourceState:
     skew = max(clock_values) - min(clock_values) if len(clock_values) > 1 else 0
     records.append({
         "check": "clock-skew", "node": "cluster",
-        "status": "ready" if len(clock_values) == 3 and skew < 5_000_000_000
+        "status": "ready" if len(clock_values) == 5 and skew < 5_000_000_000
         else "failed",
         "output": f"maximum skew {skew} ns",
     })

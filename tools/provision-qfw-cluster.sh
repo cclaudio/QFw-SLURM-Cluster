@@ -13,7 +13,8 @@ account="qfw-test"
 containers=(
 	slurmdbd slurmctld slurmrestd
 	c1 c2 c3 c4 c5 c6 c7 c8
-	nwqsim-head nwqsim-worker-1 nwqsim-worker-2 iqm-head shim-head
+	nwqsim-head nwqsim-worker-1 nwqsim-worker-2
+	iqm-head shim-head fake-iqm-head
 )
 
 die() {

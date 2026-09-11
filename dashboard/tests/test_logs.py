@@ -57,6 +57,19 @@ def test_shim_service_diagnostics_include_defw_logs() -> None:
     )
 
 
+def test_fake_iqm_logs_use_fake_iqm_node() -> None:
+    source = SOURCES["fake-iqm-qpm"]
+    assert source.container == "fake-iqm-head"
+    assert "fake-iqm/logs/defw_py.log" in source.path
+
+    diagnostics = {
+        item.name: item
+        for item in SERVICE_DIAGNOSTICS["fake-iqm"]
+    }
+    assert diagnostics["logs/defw_py.log"].container == "fake-iqm-head"
+    assert diagnostics["logs/defw_out.log"].container == "fake-iqm-head"
+
+
 def test_application_log_retains_captured_identity() -> None:
     source = LogSource(
         "application", "experiment", "slurmctld", "/tmp/output",

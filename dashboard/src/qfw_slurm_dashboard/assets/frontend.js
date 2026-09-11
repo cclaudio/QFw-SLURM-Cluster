@@ -93,10 +93,43 @@
     "nwqsim-dvm",
     "iqm-ornl-20q",
     "shim-ornl-20q",
+    "fake-iqm",
   ]);
+  const FALLBACK_BACKENDS = [
+    {
+      name: "nwqsim", label: "NWQSim", provider: "nwqsim", qpu: "nwqsim",
+      service_target: "nwqsim", service_id: "nwqsim",
+      max_time_minutes: 240, max_shots: 65536,
+      requires_hardware_confirmation: false,
+    },
+    {
+      name: "iqm", label: "IQM", provider: "iqm", qpu: "ornl-iqm-20q",
+      service_target: "iqm", service_id: "iqm-ornl-20q",
+      max_time_minutes: 15, max_shots: 256,
+      requires_hardware_confirmation: true,
+    },
+    {
+      name: "shim", label: "IQM shim", provider: "shim",
+      qpu: "ornl-shim-20q", service_target: "shim",
+      service_id: "shim-ornl-20q", max_time_minutes: 15, max_shots: 256,
+      requires_hardware_confirmation: true,
+    },
+    {
+      name: "fake-iqm", label: "Fake IQM", provider: "fake-iqm",
+      qpu: "fake-iqm-20q", service_target: "fake-iqm",
+      service_id: "fake-iqm", max_time_minutes: 240, max_shots: 65536,
+      requires_hardware_confirmation: false,
+    },
+  ];
   let runtimeApi = null;
   let activeIdentity = "user-a";
-  let state = { health: "unavailable", sources: {}, operations: [], experiments: [] };
+  let state = {
+    health: "unavailable",
+    sources: {},
+    operations: [],
+    experiments: [],
+    backends: FALLBACK_BACKENDS,
+  };
   let polling = null;
   let eventPolling = null;
   let eventCursor = 0;
@@ -122,6 +155,44 @@
   const activeScrollPointers = new Map();
   const popupWindows = new Map();
   const activeDashboardDialogs = new Set();
+
+  function backendCatalog() {
+    return Array.isArray(state.backends) && state.backends.length
+      ? state.backends : FALLBACK_BACKENDS;
+  }
+
+  function backendSpec(name) {
+    return backendCatalog().find((backend) => backend.name === name)
+      || backendCatalog()[0] || FALLBACK_BACKENDS[0];
+  }
+
+  function backendChoices() {
+    return backendCatalog().map((backend) => [
+      backend.name,
+      backend.label || backend.name,
+    ]);
+  }
+
+  function hardwareBackends() {
+    return new Set(
+      backendCatalog()
+        .filter((backend) => backend.requires_hardware_confirmation)
+        .map((backend) => backend.name),
+    );
+  }
+
+  function serviceTargetChoices() {
+    const choices = [["all", "All services"], ["directory", "Directory"]];
+    const seen = new Set(["all", "directory", "gateway"]);
+    backendCatalog().forEach((backend) => {
+      const target = backend.service_target;
+      if (!target || seen.has(target)) return;
+      choices.push([target, backend.label || target]);
+      seen.add(target);
+    });
+    choices.push(["gateway", "Gateway"]);
+    return choices;
+  }
 
   function contextId() {
     return String(runtimeApi?.state.contextId || "detached");
@@ -1106,6 +1177,7 @@
                 nwqsim: "nwqsim-qpm",
                 "iqm-ornl-20q": "iqm-qpm",
                 "shim-ornl-20q": "shim-qpm",
+                "fake-iqm": "fake-iqm-qpm",
               }[item.service_id || item.name] || "",
               jobs: [...(qpmJobs.get(item.service_id || item.name)?.values() || [])],
               state: item.state || item.status,
@@ -1961,11 +2033,7 @@
   function renderServiceControl() {
     const widget = "service-control";
     const services = element("div", "qfw-operation-control qfw-operation-services");
-    const serviceTarget = selectControl(widget, "target", [
-      ["all", "All services"], ["directory", "Directory"],
-      ["nwqsim", "NWQSim"], ["iqm", "IQM"], ["shim", "Shim"],
-      ["gateway", "Gateway"],
-    ], "all");
+    const serviceTarget = selectControl(widget, "target", serviceTargetChoices(), "all");
     const serviceAction = selectControl(widget, "operation", [
       ["status", "Status"], ["start", "Start"], ["stop", "Stop"],
       ["restart", "Restart"],
@@ -2104,13 +2172,13 @@
     shellTarget.dataset.qfwControl = "node";
     ["slurmctld", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8",
       "nwqsim-head", "nwqsim-worker-1", "nwqsim-worker-2", "iqm-head",
-      "shim-head"]
+      "shim-head", "fake-iqm-head"]
       .forEach((name) => {
         const option = element("option", "", name);
         option.value = name;
         option.disabled = activeIdentity !== "root"
           && (name.startsWith("nwqsim-") || name === "iqm-head"
-            || name === "shim-head");
+            || name === "shim-head" || name === "fake-iqm-head");
         shellTarget.append(option);
       });
     shellTarget.value = controlValue(widget, "node", "slurmctld");
@@ -2138,7 +2206,7 @@
       ? state.examples
       : [{
         name: "qiskit-simple",
-        backends: ["nwqsim", "iqm"],
+        backends: backendCatalog().map((backend) => backend.name),
         parameters: [{
           name: "qubits", label: "Qubits", type: "integer",
           default: 4, minimum: 1, maximum: 10000,
@@ -2438,8 +2506,8 @@
     );
     const backend = element("select");
     backend.dataset.qfwApplicationBackend = "";
-    ["nwqsim", "iqm"].forEach((name) => {
-      const option = element("option", "", name);
+    backendChoices().forEach(([name, label]) => {
+      const option = element("option", "", label);
       option.value = name;
       backend.append(option);
     });
@@ -2774,9 +2842,16 @@
     );
 
     function updateBackendConstraints() {
-      timeMinutes.max = backend.value === "iqm" ? "15" : "240";
-      if (backend.value === "iqm" && Number(timeMinutes.value) > 15) {
-        timeMinutes.value = "15";
+      const selectedBackend = backendSpec(backend.value);
+      const maxTime = Number(selectedBackend.max_time_minutes || 240);
+      const maxShots = Number(selectedBackend.max_shots || 65536);
+      timeMinutes.max = String(maxTime);
+      shots.max = String(maxShots);
+      if (Number(timeMinutes.value) > maxTime) {
+        timeMinutes.value = String(maxTime);
+      }
+      if (Number(shots.value) > maxShots) {
+        shots.value = String(maxShots);
       }
       [...example.options].forEach((option) => {
         option.disabled = !String(option.dataset.backends || "")
@@ -3226,7 +3301,10 @@
         submissionStatus.dataset.state = "idle";
         return;
       }
-      const hardware = staged.some((entry) => entry.request?.backend === "iqm");
+      const hardwareBackendNames = hardwareBackends();
+      const hardware = staged.some((entry) => (
+        hardwareBackendNames.has(entry.request?.backend)
+      ));
       if (hardware && !await confirmDashboardAction(
         "Submit real-hardware applications",
         "This Submission Set contains bounded work for real IQM hardware.",
@@ -3573,7 +3651,7 @@
       if (!["status", "start", "stop", "restart", "recover"].includes(
         values.operation,
       )) return;
-      if (!["all", "directory", "nwqsim", "iqm", "shim", "gateway"].includes(values.target)) return;
+      if (!serviceTargetChoices().some(([target]) => target === values.target)) return;
       await runOperation("services", {
         action: `service-${values.operation}`, target: values.target,
       });
@@ -3653,7 +3731,7 @@
     source.dataset.qfwFilter = "source";
     ["application", "slurm", "gateway", "directory", "nwqsim-qpm",
       "nwqsim-dvm", "nwqsim-simulator", "iqm-qpm", "iqm-provider",
-      "shim-qpm", "shim-provider"]
+      "shim-qpm", "shim-provider", "fake-iqm-qpm", "fake-iqm-provider"]
       .forEach((name) => {
         const option = element("option", "", name);
         option.value = name;

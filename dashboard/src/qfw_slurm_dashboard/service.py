@@ -18,6 +18,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from .backends import BACKENDS, backend_payload, backend_spec
 from .collectors import (
     diagnostics,
     inventory_status,
@@ -122,6 +123,7 @@ EXAMPLE_PARAMETERS: dict[str, list[dict[str, Any]]] = {
     ],
 }
 EXAMPLES = set(EXAMPLE_SCRIPTS)
+STATEVECTOR_EXAMPLES = {"qiskit-vqe"}
 
 
 class DashboardService:
@@ -149,7 +151,10 @@ class DashboardService:
             "./do_stop.sh delete && ./do_build.sh && ./do_startup.sh",
         ),
     }
-    SERVICE_TARGETS = {"all", "directory", "nwqsim", "iqm", "shim", "gateway"}
+    SERVICE_TARGETS = {
+        "all", "directory", "gateway",
+        *(spec.service_target for spec in BACKENDS.values()),
+    }
     SERVICE_OPERATIONS = {"start", "stop", "restart", "recover", "status"}
 
     def __init__(self, cluster_root: Path, state_root: Path) -> None:
@@ -183,6 +188,7 @@ class DashboardService:
                 payload.get("sources", {}).get("slurm", {}).get("records", []),
             )
             payload["identities"] = list(IDENTITIES)
+            payload["backends"] = backend_payload()
             payload["examples"] = self.examples()
             self._state_cache = payload
             self._state_cached_at = time.monotonic()
@@ -222,8 +228,8 @@ class DashboardService:
             {
                 "name": name,
                 "script": script,
-                "backends": ["nwqsim"] if name == "qiskit-vqe"
-                else ["nwqsim", "iqm"],
+                "backends": ["nwqsim"] if name in STATEVECTOR_EXAMPLES
+                else [spec.name for spec in BACKENDS.values()],
                 "hardware_risk": name != "init-test",
                 "parameters": EXAMPLE_PARAMETERS.get(name, []),
             }
@@ -804,6 +810,7 @@ class DashboardService:
                 request, default_identity="", require_hardware_confirmation=True
             )
         )
+        backend_config = backend_spec(backend)
         experiment_id = self._experiment_id(request)
         if any(
             item.get("experiment_id") == experiment_id
@@ -832,8 +839,9 @@ class DashboardService:
                     self.cluster_root / "dashboard/external/electroboy"
                 ),
                 "backend_configuration": {
-                    "service_id": "nwqsim" if backend == "nwqsim"
-                    else "iqm-ornl-20q",
+                    "service_id": backend_config.service_id,
+                    "provider": backend_config.provider,
+                    "qpu": backend_config.qpu,
                     "site_config": "/etc/openqse/qfw/site.yaml",
                 },
                 "deployment_inventory": inventory_status(self.runner).records,
@@ -851,7 +859,7 @@ class DashboardService:
                 "action": "experiment-submit",
                 "target": backend,
                 "request_id": experiment.experiment_id,
-                "hardware": backend == "iqm",
+                "hardware": backend_config.requires_hardware_confirmation,
                 "outcome": "accepted",
             })
             thread = threading.Thread(
@@ -938,6 +946,12 @@ class DashboardService:
     ) -> tuple[str, str, str, str, dict[str, Any]]:
         identity = str(request.get("identity", default_identity))
         backend = str(request.get("backend", ""))
+        if backend not in BACKENDS:
+            raise ValueError(
+                "backend must be one of "
+                + ", ".join(sorted(BACKENDS))
+            )
+        backend_config = backend_spec(backend)
         application_source, example, application_path, submission_type = (
             self._application(request)
         )
@@ -953,8 +967,6 @@ class DashboardService:
         mode = str(request.get("allocation_mode", "normal"))
         if identity not in IDENTITIES:
             raise ValueError("unsupported identity")
-        if backend not in {"nwqsim", "iqm"}:
-            raise ValueError("backend must be nwqsim or iqm")
         if mode not in {"normal", "heterogeneous"}:
             raise ValueError("invalid allocation mode")
         partition = self._optional_name(request, "partition", "normal")
@@ -967,12 +979,14 @@ class DashboardService:
             raise ValueError("qfw-services is reserved for site-owned services")
         if (
             require_hardware_confirmation
-            and backend == "iqm"
+            and backend_config.requires_hardware_confirmation
             and request.get("submit_real_hardware") is not True
         ):
-            raise PermissionError("real IQM submission requires explicit confirmation")
+            raise PermissionError(
+                f"{backend_config.label} submission requires explicit confirmation"
+            )
         shots = int(request.get("shots", 16))
-        if shots < 1 or shots > (256 if backend == "iqm" else 65536):
+        if shots < 1 or shots > backend_config.max_shots:
             raise ValueError("shots outside permitted range")
         nodes = int(request.get("nodes", 1))
         if nodes < 1 or nodes > 8:
@@ -982,9 +996,11 @@ class DashboardService:
         service_tasks = self._bounded(
             request, "service_tasks", service_nodes, 1, 128
         )
-        time_minutes = int(request.get("time_minutes", 15 if backend == "iqm" else 45))
-        maximum_minutes = 15 if backend == "iqm" else 240
-        if time_minutes < 1 or time_minutes > maximum_minutes:
+        time_minutes = int(request.get(
+            "time_minutes",
+            min(45, backend_config.max_time_minutes),
+        ))
+        if time_minutes < 1 or time_minutes > backend_config.max_time_minutes:
             raise ValueError("time_minutes outside permitted range")
         requirements = {
             "circ_count": self._bounded(request, "circ_count", 1, 1, 1000000),
@@ -1021,6 +1037,7 @@ class DashboardService:
             "application_arguments": application_arguments,
             "application_parameters": application_parameters,
             "batch_script": batch_script,
+            "backend_configuration": backend_config.as_dict(),
         }
         self._validate_application_capacity(example, requirements)
         if requirements["workload_kind"] not in {"quantum", "hybrid"}:
@@ -1382,9 +1399,9 @@ class DashboardService:
         requirements: dict[str, Any],
         output_path: str,
     ) -> str:
-        qpu = "nwqsim" if experiment.backend == "nwqsim" else "ornl-iqm-20q"
+        backend_config = backend_spec(experiment.backend)
         quantum_fields = [
-            f"--qpu={qpu}",
+            f"--qpu={backend_config.qpu}",
             f"--workload-kind={requirements['workload_kind']}",
             f"--circ-count={requirements['circ_count']}",
             f"--max-qubits={requirements['max_qubits']}",
@@ -1484,7 +1501,7 @@ class DashboardService:
                     f"QFW_RUN_ALL_TESTS={experiment.example}",
                     "./qfw_run_all.sh",
                     "--service-mode", "site",
-                    "--backend", experiment.backend,
+                    "--backend", backend_config.provider,
                 )),
             ))
         return "\n".join((
@@ -1632,9 +1649,11 @@ class DashboardService:
             raise ValueError("unsupported identity")
         if not _SAFE_NAME.fullmatch(target):
             raise ValueError("invalid shell target")
-        service_nodes = {"iqm-head", "shim-head", "nwqsim-head",
-                         "nwqsim-worker-1", "nwqsim-worker-2", "slurmdbd",
-                         "slurmrestd", "mysql"}
+        service_nodes = {
+            "iqm-head", "shim-head", "fake-iqm-head",
+            "nwqsim-head", "nwqsim-worker-1", "nwqsim-worker-2",
+            "slurmdbd", "slurmrestd", "mysql",
+        }
         if target in service_nodes and identity != "root":
             raise PermissionError("service-node shells require root selection")
         home = "/root" if identity == "root" else f"/workspace/home/{identity}"
