@@ -1,6 +1,5 @@
 x-slurmd-resources: &slurmd-resources
   cpus: 4
-  cpuset: "0-3"
   mem_limit: 6g
 
 services:
