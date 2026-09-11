@@ -160,6 +160,10 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     assert '"Next defw_py.log level"' in frontend
     assert "const JOB_COLORS" in frontend
     assert "function jobColor(jobId)" in frontend
+    assert "const TOPOLOGY_CONNECTOR_COLORS" in frontend
+    assert "const connectorSourceColors = new Map();" in frontend
+    assert "function topologyConnectorColor(sourceId)" in frontend
+    assert '"--qfw-topology-edge-color"' in frontend
     assert "const clusterNodes = new Map();" in frontend
     assert 'type: "node", id: "slurmctld"' in frontend
     assert '...slurmJobs.map((item) => ({' not in frontend
@@ -340,6 +344,7 @@ def test_dashboard_uses_electroboy_pane_colors() -> None:
     assert ".qfw-topology-object.qfw-topology-state-stopped rect" in stylesheet
     assert ".qfw-topology-edge-service" in stylesheet
     assert ".qfw-topology-edge-object" in stylesheet
+    assert "stroke: var(--qfw-topology-edge-color, var(--qfw-violet));" in stylesheet
     assert ".qfw-topology-hover" in stylesheet
     assert ".qfw-topology-job-active" in stylesheet
     assert ".qfw-topology-job-stripe" in stylesheet

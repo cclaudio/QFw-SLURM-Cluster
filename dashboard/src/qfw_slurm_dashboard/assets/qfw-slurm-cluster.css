@@ -1268,13 +1268,16 @@
 }
 
 .qfw-topology-edge {
+  stroke: var(--qfw-topology-edge-color, var(--qfw-violet));
+  stroke-linecap: round;
   stroke-width: 2;
+  transition: stroke 180ms ease, opacity 180ms ease;
 }
 
-.qfw-topology-edge-object { stroke: var(--qfw-violet); }
+.qfw-topology-edge-object { opacity: 0.82; }
 
 .qfw-topology-edge-service {
-  stroke: var(--qfw-teal);
+  opacity: 0.92;
   stroke-width: 3;
 }
 

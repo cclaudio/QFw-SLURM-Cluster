@@ -57,6 +57,10 @@
     "#32d6c5", "#75d982", "#54b8ff", "#8fa3ff", "#c893ff",
     "#ef8fd2", "#e6dc68", "#68d8f0", "#a8dc72", "#d4a5ff",
   ];
+  const TOPOLOGY_CONNECTOR_COLORS = [
+    "#5ee8ff", "#9b8cff", "#2df4c3", "#ffc76b", "#54b8ff",
+    "#ef8fd2", "#75d982", "#c893ff", "#68d8f0", "#e6dc68",
+  ];
   const CANVAS_ZOOM_MIN = 5;
   const CANVAS_ZOOM_MAX = 1000;
   const CANVAS_ZOOM_STEP = 5;
@@ -1318,6 +1322,20 @@
       graphHeight = Math.max(500, 135 + Math.ceil(visibleObjects.length / 4) * 100);
     }
     svg.setAttribute("viewBox", `0 0 900 ${graphHeight}`);
+    const connectorSourceColors = new Map();
+    [...new Set(visibleObjects.filter((item) =>
+      item.parent && positions.has(item.parent) && positions.has(item.id))
+      .map((item) => item.parent))]
+      .sort((left, right) => String(left).localeCompare(String(right)))
+      .forEach((sourceId, index) => {
+        connectorSourceColors.set(
+          sourceId,
+          TOPOLOGY_CONNECTOR_COLORS[index % TOPOLOGY_CONNECTOR_COLORS.length],
+        );
+      });
+    function topologyConnectorColor(sourceId) {
+      return connectorSourceColors.get(sourceId) || TOPOLOGY_CONNECTOR_COLORS[0];
+    }
     partitionFrames.forEach((frame) => {
       const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
       group.classList.add(
@@ -1354,6 +1372,11 @@
         "class",
         `qfw-topology-edge ${serviceEdge
           ? "qfw-topology-edge-service" : "qfw-topology-edge-object"}`,
+      );
+      line.dataset.sourceObject = item.parent;
+      line.style.setProperty(
+        "--qfw-topology-edge-color",
+        topologyConnectorColor(item.parent),
       );
       svg.append(line);
     });
