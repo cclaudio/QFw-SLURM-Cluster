@@ -2,6 +2,7 @@
   "use strict";
 
   const WORKFLOW_ID = "qfw-slurm-cluster";
+  document.title = "Dashboard";
   const IDENTITIES = ["user-a", "user-b", "user-c", "root"];
   const WIDGET_GROUPS = [
     {

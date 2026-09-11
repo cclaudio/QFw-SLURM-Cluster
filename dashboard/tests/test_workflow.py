@@ -21,6 +21,7 @@ def test_frontend_declares_exact_pane_catalog_and_fixed_widgets() -> None:
     frontend = resources.files("qfw_slurm_dashboard").joinpath(
         "assets/frontend.js"
     ).read_text()
+    assert 'document.title = "Dashboard";' in frontend
     for label in ("Dashboard", "AI Agent", "Progress", "File", "Shell"):
         assert f'label: "{label}"' in frontend
     assert '{ kind: "agent", label: "AI Agent" }' in frontend
