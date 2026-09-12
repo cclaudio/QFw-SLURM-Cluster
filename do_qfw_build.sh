@@ -81,9 +81,13 @@ set -euo pipefail
 
 QFW_BASE="${QFW_BASE:-/workspace/qfw-container-base}"
 QFW_SRC="${QFW_SRC:-${QFW_DEV_SRC:-${QFW_BASE}/QFw}}"
-QFW_VENV="${QFW_VENV:-${QFW_DEV_VENV:-${QFW_BASE}/qfw-venv}}"
+# QFW_VENV and QFW_PREFIX are baked into the image ENV pointing at the
+# official image install. Unset them so the dev defaults below take effect
+# unless the caller has explicitly exported QFW_DEV_* overrides.
+unset QFW_VENV QFW_PREFIX
+QFW_VENV="${QFW_DEV_VENV:-${QFW_BASE}/qfw-venv}"
 QFW_BUILD="${QFW_BUILD:-${QFW_DEV_BUILD:-${QFW_BASE}/qfw-build}}"
-QFW_PREFIX="${QFW_PREFIX:-${QFW_DEV_PREFIX:-${QFW_BASE}/qfw-install}}"
+QFW_PREFIX="${QFW_DEV_PREFIX:-${QFW_BASE}/qfw-install}"
 QFW_HOST_BASE="${QFW_HOST_BASE:-shared-dir}"
 QFW_CONTAINER_NAME="${QFW_CONTAINER_NAME:-slurmctld}"
 
