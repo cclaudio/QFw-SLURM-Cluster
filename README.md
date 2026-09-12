@@ -277,6 +277,7 @@ git clone --recursive git@github.com:openQSE/QFw.git \
 
 ```bash
 ./do_ssh.sh
+export QFW_SHARED_ROOT=/workspace/qfw-container-base
 source /workspace/qfw-container-base/qfw-install/bin/qfw-activate \
   --venv /workspace/qfw-container-base/qfw-venv
 cd "${QFW_SHARE_DIR}/examples"
