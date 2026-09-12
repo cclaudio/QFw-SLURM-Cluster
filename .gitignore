@@ -32,3 +32,7 @@ docker-compose.override.yml
 /shared-dir/qfw-install/
 /shared-dir/qfw-venv/
 /shared-dir/qfw-site-services/
+
+# Per-user home dirs provisioned inside containers (owned by rootless-podman
+# subuid-mapped UIDs, mode 0700 -- unreadable by the host user)
+/shared-dir/home/
