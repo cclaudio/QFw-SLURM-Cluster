@@ -167,6 +167,11 @@ gateway that `qfw-site-services` starts. Advertising a second AWS target needs
 the shim to bind a reservation's selected target to the matching AWS-QDMI
 device session first.
 
+As installed, the `aws` entry is a placeholder. QFw's Braket profile opens a
+session only when `provider-device-id` is a Braket device ARN, so the service
+cannot run circuits until the entry names a real device, as QFw's
+`examples/qfw_shim_device_access.yaml` does for SV1 and Cepheus.
+
 The relative credential path resolves beside `device-access.yaml` as
 `/etc/openqse/qfw/device/qpu-users.json`.
 
