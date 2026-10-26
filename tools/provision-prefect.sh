@@ -122,7 +122,8 @@ uv pip install --quiet --python "${PREFECT_VENV}" --override "${override}" \
 
 # 4. qcsc-prefect, the same way its tutorial installs it: the four framework
 #    packages without dependencies, then the workflow utility and the SBD
-#    workflow, which pull Prefect, Ray, ffsim, pyscf and qiskit-addon-sqd.
+#    workflow with its optional Ray task runner, which pulls Prefect, Ray,
+#    ffsim, pyscf and qiskit-addon-sqd.
 say "installing the qcsc-prefect packages"
 uv pip install --quiet --python "${PREFECT_VENV}" --no-deps \
 	--override "${override}" \
@@ -140,7 +141,7 @@ uv pip install --quiet --python "${PREFECT_VENV}" -c "${base}" \
 	--override "${override}" \
 	"pydantic_numpy>=9" "fastapi<0.150" \
 	-e "${QCSC_DIR}/algorithms/qcsc_workflow_utility" \
-	-e "${QCSC_DIR}/algorithms/sbd"
+	-e "${QCSC_DIR}/algorithms/sbd[ray]"
 
 # 5. ffsim's wheel must run on this CPU. On some aarch64 hosts it does not
 #    (Illegal instruction), and the tutorial's remedy is a source build.
