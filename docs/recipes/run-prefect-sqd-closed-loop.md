@@ -17,9 +17,10 @@ manual setup becomes repeatable:
 | `tools/prefect-sqd` | Start the Prefect server, create the blocks, submit runs, stop. |
 | `docker-compose.prefect.yml` | Publish the Prefect UI on the Docker host. |
 
-Everything runs as a non-root application user. The Prefect server, the
-served deployment and the workflow process live in `slurmctld`; the SBD
-solver runs on the `normal` partition through `sbatch` and `srun`.
+The workflow runtime runs as a non-root application user. The Prefect server,
+the served deployment, and the workflow process live in `slurmctld`; quantum
+stages using `quantum_source=qfw` and the SBD solver run on the `normal`
+partition as Slurm jobs.
 
 ## Prerequisites
 
@@ -112,8 +113,10 @@ to use threads instead.
 `blocks` writes `/workspace/home/user-a/sbd_blocks.toml` for this cluster
 (account `qfw-test`, partition `normal`, one node, `SBD_MPIPROCS` ranks,
 `SBD_WALLTIME`), creates the Slurm SBD blocks from it, registers the
-`QFwResource` block type from the main thread and creates the `qfw-runner`
-block for `QFW_PREFECT_DEVICE` (default `ornl-iqm-20q`).
+`QFwResource` block type from the main thread, and creates the `qfw-runner`
+block for `QFW_PREFECT_DEVICE` (default `ornl-iqm-20q`). The workflow still
+loads this block for its QFw configuration, while quantum sampling with
+`quantum_source=qfw` is submitted through `run_sampler_job()` and QFw-SLURM.
 
 ## Run the Workflow
 
