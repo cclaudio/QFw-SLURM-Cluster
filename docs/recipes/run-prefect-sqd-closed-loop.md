@@ -40,10 +40,25 @@ from the Docker host, append the Prefect compose file to `COMPOSE_FILE` in
 COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.telemetry.yml:docker-compose.prefect.yml
 ```
 
-The mapping binds `127.0.0.1:4200` and takes effect when `slurmctld` is
-recreated, which also means running `tools/provision-qfw-cluster.sh` and
-`qfw-site-services start` again. Without it, drive the workflow from the
-command line as shown below.
+The mapping binds `127.0.0.1:4200` on the Docker host and takes effect when
+`slurmctld` is recreated, which also means running
+`tools/provision-qfw-cluster.sh` and `qfw-site-services start` again.
+
+If the cluster is running on a remote host, forward the Prefect UI port from
+your local machine:
+
+```bash
+ssh -L 4200:127.0.0.1:4200 <user>@<remote-host>
+```
+
+Then open `http://127.0.0.1:4200` in a local browser. If the cluster is
+running locally, open the same URL directly without SSH port forwarding.
+
+The Prefect UI can be used to follow flow and task execution and inspect the
+SQD walkers while their quantum and SBD stages run through Slurm. A workflow
+run can also be submitted from the deployment page with **Run → Custom run**
+using the parameters described in the upstream tutorial. The command-line
+workflow shown below remains available when the UI is not needed.
 
 ## Provision the Workflow Environment
 
@@ -132,48 +147,45 @@ With the UI published, the same run starts from the deployment page with
 
 ## The qfw Quantum Source
 
-With `quantum_source=qfw`, the workflow loads the `qfw-runner` block and
-samples through QFw's QRMI driver **inside the workflow process**: it reads
-the device-access file named in the block, resolves the calling user's
-credentials from that file's credential database, opens the QRMI resource
-and runs the circuit. It does not reserve the QPM through qfw-slurm, does not
-talk to the site QPM service, and leaves no trace in QFw's telemetry.
+With `quantum_source=qfw`, each SQD walker submits its quantum sampling stage
+as a Slurm job through `qfw_slurm_sampler.py`. The Slurm job carries the
+qfw-slurm reservation options, runs the SQD sampler under `qfw-srun`, and
+executes the circuit through `QFwBackend`.
 
-That has consequences on this cluster:
+The workflow process itself does not hold the QFw reservation. Instead:
 
-- The site device-access file and credential database under
-  `/etc/openqse/qfw/device` are root-only. The workflow user needs its own
-  readable device-access file whose `credential-db` holds that user's
-  records. Point the block at it with `QFW_PREFECT_DEVICE_ACCESS` before
-  `tools/prefect-sqd blocks`.
-- Only QRMI devices work: `ornl-iqm-20q` (needs the IQM tunnel) and
-  `ibm-156-nh` (needs an IBM key). The NWQSim simulator, the fake IQM QPM and
-  the QDMI devices, Braket included, cannot be selected.
-- Reset mitigation is off in the run command; the tutorial recommends that
-  for direct-access systems.
+1. Prefect creates the LUCJ circuit and applies the ffsim pre-initialization
+   required before QPY serialization.
+2. `qfw_slurm_sampler.py` writes the circuit to the job directory and submits
+   a Slurm job.
+3. qfw-slurm reserves the selected QPM for the allocation.
+4. The SQD sampler runs under `qfw-srun`, obtains the device-specific
+   `QFwBackend.target`, performs target-aware transpilation, and executes the
+   circuit.
+5. The sampler writes the counts record back to the shared job directory.
+6. The Prefect walker converts the returned counts to a `BitArray` and
+   continues with recovery and the SBD stage.
 
-The cluster's gitignored IQM files, `shared-dir/iqm-device-access.yaml` and
-`shared-dir/iqm-creds.json`, already form such a pair for `root` through the
-IQM tunnel. With the tunnel up, run the workflow process as root against
-them. The Prefect server keeps running as `user-a`; only the served
-deployment changes hands, and root's SBD work directory must be on the
-shared workspace because root's home is not:
+For IBM devices accessed through QRMI, the corresponding entry in
+`config/device-access.yaml` must include:
 
-```bash
-tools/prefect-sqd stop serve
-QFW_PREFECT_USER=root QFW_PREFECT_DEVICE=ornl-iqm-20q \
-  QFW_PREFECT_DEVICE_ACCESS=/mnt/iqm-device-access.yaml \
-  SBD_WORK_DIR=/workspace/qfw-container-base/sbd_jobs \
-  tools/prefect-sqd blocks
-QFW_PREFECT_USER=root PREFECT_RAY_NUM_CPUS=4 tools/prefect-sqd start
-QFW_PREFECT_USER=root tools/prefect-sqd run qfw 10000 1
+```yaml
+caps:
+  run_circuit: [qrmi]
+  get_backend_info: [qrmi]
+  get_task_timing: [qrmi]
+  get_task_metadata: [qrmi]
 ```
 
-The SBD jobs of that run are then submitted by root. Afterwards,
-`QFW_PREFECT_USER=root tools/prefect-sqd stop serve` and a plain `blocks`
-and `start` return the deployment to `user-a`. This path has not been
-exercised on the cluster yet; the tunnel was down when the recipe was
-written.
+`get_backend_info` allows `QFwBackend.target` to obtain the device-specific
+target through the QPM telemetry path.
+
+The SQD path uses the generic `run_sampler_job()` helper with a custom sampler
+and `sampler_args` to pass the SQD transpilation options into the Slurm job.
+
+The QFw-SLURM SQD path has been validated end to end with the IBM QRMI backend.
+Other QFw-SLURM QPMs have not yet been validated for this workflow; they require
+`QFwBackend.target` to supply the device target needed for SQD transpilation.
 
 ## Stop
 
