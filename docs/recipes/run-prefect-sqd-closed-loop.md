@@ -152,6 +152,11 @@ as a Slurm job through `qfw_slurm_sampler.py`. The Slurm job carries the
 qfw-slurm reservation options, runs the SQD sampler under `qfw-srun`, and
 executes the circuit through `QFwBackend`.
 
+`tools/prefect-sqd` sets `QFW_SLURM_BIN` to the provisioned `bin/` directory
+under the Prefect workspace by default. This directory contains
+`qfw_slurm_sampler.py`, installed by `tools/provision-prefect.sh`. Set
+`QFW_SLURM_BIN` explicitly only when using a different helper location.
+
 The workflow process itself does not hold the QFw reservation. Instead:
 
 1. Prefect creates the LUCJ circuit and applies the ffsim pre-initialization
