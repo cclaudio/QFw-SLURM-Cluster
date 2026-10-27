@@ -289,11 +289,9 @@ durable, edit `config/` on the host and delete the installed copy so the next
 
 The image installs MQT Core, built from the ref selected by `do_configure.sh`,
 into the same Python environment as QFw (`/opt/openqse/qfw-venv`). QFw's
-requirements provide the Qiskit 2.5.x that the MQT compiler needs, so no
-separate environment is required. `do_qfw_build.sh` builds the mounted MQT Core
-checkout into `/workspace/qfw-container-base/qfw-venv` unless `--skip-venv` is
-used. If an older build left `shared-dir/mqt-cc-venv`, it is no longer used and
-can be deleted.
+requirements provide the Qiskit 2.5.x that the MQT compiler needs.
+`do_qfw_build.sh` builds the mounted MQT Core checkout into
+`/workspace/qfw-container-base/qfw-venv` unless `--skip-venv` is used.
 
 `shared-dir/mqt-cc-smoke-test.sbatch` compiles a Qiskit circuit for
 MQT Core's bundled IQM Garnet model to QIR Base. It uses QDMI to read the

@@ -35,4 +35,3 @@ docker-compose.override.yml
 
 # MQT Core developer override
 /shared-dir/mqt-core/
-/shared-dir/mqt-cc-venv/

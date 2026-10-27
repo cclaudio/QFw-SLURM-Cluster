@@ -756,12 +756,10 @@ If [Slurm] config changes are not visible inside the running containers:
 ./update_slurmfiles.sh slurm.conf gres.conf rest.conf cgroup.conf
 ```
 
-If the mounted developer venvs came from an older image:
+To rebuild the mounted developer venv from scratch:
 
 ```bash
-docker exec slurmctld rm -rf \
-  /workspace/qfw-container-base/qfw-venv \
-  /workspace/qfw-container-base/mqt-cc-venv
+docker exec slurmctld rm -rf /workspace/qfw-container-base/qfw-venv
 ./do_qfw_build.sh
 ```
 
