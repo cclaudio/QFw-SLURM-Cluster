@@ -206,6 +206,18 @@ if [ "${QFW_SKIP_VENV}" != "true" ]; then
     # is built from it. Qiskit 2.5.x is already in this venv.
     CMAKE_BUILD_PARALLEL_LEVEL="${jobs}" \
         uv pip install --reinstall-package mqt-core "${MQT_CORE_SRC}"
+
+    # The QDMI shim adapters run on this same mqt-core, so a checkout that is
+    # not the pinned release changes them as well.
+    mqt_core_pin="$(sed -n 's/^mqt-core\(\[[^]]*\]\)\{0,1\}==\([^ ;#]*\).*/\2/p' \
+        "${QFW_SRC}/setup/qdmi-requirements.txt" | head -n 1)"
+    mqt_core_installed="$(uv pip show mqt-core 2>/dev/null |
+        sed -n 's/^Version: *//p' || true)"
+
+    if [ -n "${mqt_core_pin}" ] && [ "${mqt_core_installed}" != "${mqt_core_pin}" ]; then
+        echo "WARNING: mqt-core ${mqt_core_installed:-unknown} from ${MQT_CORE_SRC} is installed," >&2
+        echo "         but setup/qdmi-requirements.txt pins ${mqt_core_pin}." >&2
+    fi
 else
     # shellcheck disable=SC1091
     source "${QFW_VENV}/bin/activate"
