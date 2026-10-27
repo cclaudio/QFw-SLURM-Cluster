@@ -157,7 +157,7 @@ if [ "${QFW_SKIP_VENV}" != "true" ]; then
     fi
     if [ ! -f "${QFW_SRC}/setup/overrides.txt" ]; then
         echo "No dependency overrides at ${QFW_SRC}/setup/overrides.txt." >&2
-        echo "Select a QFw checkout that includes openQSE/QFw#170 (Qiskit 2.5)." >&2
+        echo "This file may be empty but must exist for do_qfw_build.sh to work." >&2
         exit 1
     fi
     if [ ! -f "${MQT_CORE_SRC}/pyproject.toml" ]; then
