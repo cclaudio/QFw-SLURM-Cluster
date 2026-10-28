@@ -1,9 +1,9 @@
 ## Configure and start the IBM QSA simulator in the QFw slurm cluster
 
-This recipe shows how to configure and start the IBM QSA simulator for the
-purpose of developement/testing in QFw - please check the
-[qsa-sim](https://github.com/qrmi-community/simulated_quantum_resource.git)
-repository for further detais and limitations.
+The IBM QSA simulator (`qsa-sim`) is documented in the
+[simulated_quantum_resource](https://github.com/qrmi-community/simulated_quantum_resource.git)
+repository. This recipe shows how to configure and start it for the purpose of
+developement/testing in QFw.
 
 If you want to experiment with real IBM Quantum System devices (on-prem), please
 check the [IBM Quantum
@@ -16,20 +16,15 @@ Prerequisites:
 - docker-compose or podman-compose
 - If using podman, please also install the podman-docker package.
 
-The IBM QSA simulator (qsa-sim) does not need to run within the cluster. You can
-install it in the docker host or somewhere else accessible by the cluster.
+You can start the `qsa-sim` anywhere, as long as it is accessible by the slurm
+cluster. For example, you could start it in the host of the container-based
+slurm cluster. Quick instructions below.
 
-The instructions below will install and setup the QSA simulator and a
-S3-compatible service. For more information, please refer to the
-[simulated_quantum_resource](https://github.com/qrmi-community/simulated_quantum_resource)
-documentation.
-
-Set the `.env` variables as you see fit. For testing, you could keep them as-is.
+The `.env` variables can be updated as you see fit.
 
 ```bash
 git clone https://github.com/qrmi-community/simulated_quantum_resource.git
 cd simulated_quantum_resource
-# Update the variables below as necessary
 cat << EOF > .env
 QSASIM_IAM_APIKEY=myapikey
 QSASIM_SERVICE_CRN=myinstance
@@ -44,6 +39,18 @@ S3_REGION=us-east
 EOF
 docker compose up --build
 # or: podman compose up --build
+```
+
+That should start three containers. They work together to provide the qsa-sim
+and S3 services. The S3 bucket pointed out in the `.env` is created
+automatically.
+
+```text
+$ podman ps --format "table {{.Names}} \t {{.Image}} \t {{.Status}}"
+NAMES                                     IMAGE                                                   STATUS
+simulated_quantum_resource_rustfs_1       docker.io/rustfs/rustfs:latest                          Up 4 minutes (healthy)
+simulated_quantum_resource_qsa_sim_1      localhost/simulated_quantum_resource_qsa_sim:latest     Up 4 minutes
+simulated_quantum_resource_s3_proxy_1     docker.io/alpine/socat:latest                           Up 4 minutes
 ```
 
 ### 2. Populate credentials
