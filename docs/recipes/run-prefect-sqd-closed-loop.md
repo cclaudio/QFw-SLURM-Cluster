@@ -62,16 +62,20 @@ workflow shown below remains available when the UI is not needed.
 
 ## Configure QFw Device Access
 
-This section is required only when using `quantum_source=qfw`.
+This section is required when using `quantum_source=qfw`.
 
 Before provisioning the cluster, review:
 
 - `config/device-access.yaml`
 - `config/qpu-users.json`
 
-The cluster configuration already defines the logical QFw device
-`ibm-156-nh`. In `config/device-access.yaml`, set its `provider-device-id`
-to the IBM Quantum backend that should execute the circuits.
+Select the QFw device that should execute the quantum sampling stages and
+ensure that its provider configuration and credentials are available before
+running `tools/provision-qfw-cluster.sh`.
+
+The cluster configuration includes `ibm-156-nh` as an IBM Quantum example.
+For this device, set `provider-device-id` in `config/device-access.yaml` to
+the IBM Quantum backend that should execute the circuits.
 
 For example:
 
@@ -96,6 +100,9 @@ ibm-156-nh:
 The corresponding entry in `config/qpu-users.json` must contain enabled IBM
 Quantum credentials for the Slurm application user and `ibm-156-nh`,
 including the API key and service CRN.
+
+For another QFw-supported device, configure the corresponding logical device,
+provider mapping, and credentials required by that provider.
 
 Configure these files before running `tools/provision-qfw-cluster.sh`.
 
@@ -188,7 +195,10 @@ block for `QFW_PREFECT_DEVICE` (default `ornl-iqm-20q`). The workflow still
 loads this block for its QFw configuration, while quantum sampling with
 `quantum_source=qfw` is submitted through `run_sampler_job()` and QFw-SLURM.
 
-For IBM Quantum execution, create the QFw block with `ibm-156-nh`:
+Create the QFw resource block for the device that should execute the quantum
+stages.
+
+For the IBM configuration included with this cluster:
 
 ```bash
 QFW_PREFECT_DEVICE=ibm-156-nh tools/prefect-sqd blocks
@@ -198,6 +208,12 @@ The command should report:
 
 ```text
 Device ID: ibm-156-nh
+```
+
+For another configured QFw device:
+
+```bash
+QFW_PREFECT_DEVICE=<device-id> tools/prefect-sqd blocks
 ```
 
 ## Run the Workflow
@@ -247,8 +263,8 @@ tools/prefect-sqd run qfw 10000 1
 ```
 
 With `quantum_source=qfw`, each walker generates its LUCJ circuit, submits the
-sampling stage as a Slurm quantum job, executes it through `ibm-156-nh`,
-retrieves the samples, and then continues with configuration recovery,
+sampling stage as a Slurm quantum job, executes it through the selected QFw
+device, retrieves the samples, and then continues with configuration recovery,
 postselection, subsampling, and the Slurm-based SBD solver.
 
 Quantum and classical Slurm jobs can be monitored with:
@@ -302,10 +318,9 @@ target through the QPM telemetry path.
 The SQD path uses the generic `run_sampler_job()` helper with a custom sampler
 and `sampler_args` to pass the SQD transpilation options into the Slurm job.
 
-The QFw-SLURM SQD path has been validated end to end with an IBM QRMI backend.
-Other QFw-SLURM QPMs have not yet been validated for this workflow; they
-require `QFwBackend.target` to supply the device target needed for SQD
-transpilation.
+The QFw-SLURM SQD path has been validated end to end with an IBM Quantum
+device accessed through QRMI. Other QFw-supported devices may be used when
+their QPM provides the backend target required for SQD transpilation.
 
 ## Stop
 
