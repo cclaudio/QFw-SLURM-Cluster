@@ -46,81 +46,15 @@ docker compose up --build
 # or: podman compose up --build
 ```
 
-### 2. Populate credentials in qsa-sim-head
+### 2. Populate credentials
 
-Before submiting jobs to `ibm-fake-lagos`, update the `qsa-users.json` and the
-`device-access.yaml` in the `qsa-sim-head` container as below. Make sure the
-`ibm-fake-lagos` fields are populated with the same values you used to start the
-`qsa-sim`. See examples below.
+First, create the `shared-dir/qsa-sim-device-access.yaml` and
+`shared-dir/qsa-sim-creds.json` files, which contains the `ibm-fake-lagos`
+device description and credentials, respectively. They are used by both QPM
+local and site. Examples below.
 
-```bash
-./do_ssh.sh qsa-sim-head
-```
-
-`/etc/openqse/qfw/device/qpu-users.json` example. Populate it for all users.
+`shared-dir/qsa-sim-creds.json`, make sure you have this configuration for all users you are planning to use and that they have `"enabled": true`:
 ```json
-        "ibm-fake-lagos": {
-          "enabled": true,
-          "api_key": "myapikey",
-          "aws_access_key_id": "myaccesskey",
-          "aws_secret_access_key": "mysecretkey"
-        }
-```
-
-`/etc/openqse/qfw/device/device-access.yaml` example. Make sure you replace the
-IP addresses by the IP address of the host where you started the qsa-sim.
-
-```yaml
-  ibm-fake-lagos:
-    provider: ibm
-    resource-type: IBMQuantumSystem
-    provider-device-id: fake_lagos
-    url: http://192.168.1.41:8292
-    iam-endpoint: http://192.168.1.41:8292
-    service-crn: "myinstance"
-    s3-endpoint: http://192.168.1.41:9000
-    s3-bucket: "mybucket"
-    s3-region: "us-east"
-    job-timeout-seconds: "400"
-    credential-db: qpu-users.json
-    libraries:
-      - qrmi
-    preference: qrmi
-    execution-owner: qrmi
-    caps:
-      get_device_info: [qrmi]
-      get_coupling_graph: [qrmi]
-      get_backend_info: [qrmi]
-      get_dynamic_backend_info: [qrmi]
-      run_circuit: [qrmi]
-      get_task_timing: [qrmi]
-      get_task_metadata: [qrmi]
-      get_calibration_snapshot: [qrmi]
-```
-
-### 3. Start qfw-site-services for qsa-sim
-
-```bash
-./do_ssh.sh
-
-qfw-site-services start --target directory
-qfw-site-services start --target gateway
-qfw-site-services start --target qsa-sim
-
-# Make sure all three services are UP
-qfw-site-services status
-```
-
-### 4. [Optional] Populate credentials in slurmctld
-
-When the QPM instance is started and managed by the user, the `device-access.yaml` and `qpu-users.json` files must be created in a place where the user can update them, but not accessible by others.
-
-Let's use `user-a` and create the files in the `$HOME`. Similar to the section 2, make sure you populate the files with the values you used to start the qsa-sim - that includes updating the IP addresss as well.
-
-```bash
-./do_ssh.sh --user user-a
-# Create the qpu-users.json
-cat << EOF > ~/qpu-users.json
 {
   "users": {
     "user-a": {
@@ -136,23 +70,27 @@ cat << EOF > ~/qpu-users.json
     }
   }
 }
-EOF
-# Create the device-access.yaml pointing to qpu-users.json
-cat << EOF > ~/device-access.yaml
+```
+
+`shared-dir/qsa-sim-device-access.yaml`, make sure you replace `HOST_IP_ADDRESS`
+by the IP address of the docker host where you started the qsa-sim:
+
+```yaml
 qpus:
   ibm-fake-lagos:
     provider: ibm
     resource-type: IBMQuantumSystem
     provider-device-id: fake_lagos
-    url: http://192.168.1.41:8292
-    iam-endpoint: http://192.168.1.41:8292
+    url: http://<HOST_IP_ADDRESS>:8292
+    iam-endpoint: http://<HOST_IP_ADDRESS>:8292
     service-crn: "myinstance"
-    s3-endpoint: "http://192.168.1.41:9000"
+    s3-endpoint: http://<HOST_IP_ADDRESS>:9000
     s3-bucket: "mybucket"
     s3-region: "us-east"
     job-timeout-seconds: "400"
-    credential-db: /workspace/home/user-a/qpu-users.json
-    libraries: [qrmi]
+    credential-db: /mnt/qsa-sim-creds.json
+    libraries:
+      - qrmi
     preference: qrmi
     execution-owner: qrmi
     caps:
@@ -164,5 +102,40 @@ qpus:
       get_task_timing: [qrmi]
       get_task_metadata: [qrmi]
       get_calibration_snapshot: [qrmi]
-EOF
+```
+
+Notice that both files are created with the 644 permission allowing them to be read by a site and local QPM. However, all cluster users can also read them. You could improve security by running `chmod 600 shared-dir/qsa-sim-creds.json`. Users trying to run local QPMs won't be able to access the credentials (Permission denied), but they could replicate and maintain both files in their user account for the local QPM.
+
+> **SELinux note (Fedora / RHEL hosts):** The `shared-dir` bind-mount uses the
+> `:z` option, which relabels files present at container start time with the
+> `container_file_t` SELinux context. Files added *after* the containers are
+> running keep their default host context and are **blocked** by SELinux inside
+> the container (`[Errno 13] Permission denied`). If you create or replace either
+> file while the cluster is already running, relabel it manually before starting
+> QPM:
+>
+> ```bash
+> chcon --reference shared-dir/qsa-sim-device-access.yaml \
+>     shared-dir/qsa-sim-creds.json
+> ```
+
+Second, provision the `qsa-sim-device-access.yaml` for the QPM site. That is
+done by running the `tools/provision-qfw-cluster.sh`, which will access the
+`qsa-sim-head` container and create a symlink from the default
+device-access.yaml to `/mnt/qsa-sim-device-access.yaml`. Notice that within the
+container the `shared-dir` is mounted as `/mnt`.
+
+```bash
+tools/provision-qfw-cluster.sh
+```
+
+Lastly, start the qsa-sim QPM site service.
+
+```bash
+./do_ssh.sh
+qfw-site-services start --target directory
+qfw-site-services start --target gateway
+qfw-site-services start --target qsa-sim
+# Make sure all three services are UP
+qfw-site-services status
 ```

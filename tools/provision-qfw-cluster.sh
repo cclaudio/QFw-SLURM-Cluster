@@ -10,6 +10,13 @@ service_file="${script_dir}/config/site-services.yaml"
 nwqsim_runtime_file="${script_dir}/config/nwqsim-site-runtime.yaml"
 device_file="${script_dir}/config/device-access.yaml"
 credential_file="${script_dir}/config/qpu-users.json"
+# qsa-sim-head does not get the config/ device files: the simulator's address
+# and keys are site-specific (see docs/recipes/start-ibm-qsa-sim.md). Its
+# device-access.yaml is a symlink to the gitignored
+# shared-dir/qsa-sim-device-access.yaml (/mnt in the containers), and the
+# credential-db in that file points at /mnt/qsa-sim-creds.json.
+qsa_sim_container="qsa-sim-head"
+qsa_sim_device_file="${script_dir}/shared-dir/qsa-sim-device-access.yaml"
 account="qfw-test"
 containers=(
 	slurmdbd slurmctld slurmrestd
@@ -119,9 +126,13 @@ EOF
 		"${site_file}:/etc/openqse/qfw/site.yaml:0644"
 		"${service_file}:/etc/openqse/qfw/services/site-services.yaml:0644"
 		"${nwqsim_runtime_file}:/etc/openqse/qfw/nwqsim-site-runtime.yaml:0644"
-		"${device_file}:/etc/openqse/qfw/device/device-access.yaml:0600"
-		"${credential_file}:/etc/openqse/qfw/device/qpu-users.json:0600"
 	)
+	if [[ "${container}" != "${qsa_sim_container}" ]]; then
+		files+=(
+			"${device_file}:/etc/openqse/qfw/device/device-access.yaml:0600"
+			"${credential_file}:/etc/openqse/qfw/device/qpu-users.json:0600"
+		)
+	fi
 	for specification in "${files[@]}"; do
 		IFS=: read -r source destination mode <<<"${specification}"
 		temporary="/tmp/qfw-provision-$(basename "${destination}")"
@@ -143,6 +154,17 @@ fi
 rm -f "${temporary}"
 EOF
 	done
+
+	if [[ "${container}" == "${qsa_sim_container}" ]]; then
+		if [[ -r "${qsa_sim_device_file}" ]]; then
+			docker exec "${container}" ln -sfn \
+				/mnt/qsa-sim-device-access.yaml \
+				/etc/openqse/qfw/device/device-access.yaml
+		else
+			echo "qfw-provision: skipping device-access.yaml on" \
+				"${container}: ${qsa_sim_device_file} does not exist" >&2
+		fi
+	fi
 done
 
 if ! docker exec slurmctld sacctmgr --noheader --parsable2 show account \
