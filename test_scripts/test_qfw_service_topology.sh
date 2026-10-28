@@ -29,7 +29,8 @@ grep -q '^NodeName=aws .*qpm-shim-aws-qpm' "${slurm_config}"
 grep -A7 '^  aws:$' "${compose_config}" |
 	grep -q '^    container_name: aws$'
 grep -q '^NodeName=qsa-sim-head .*qpm-shim-ibm-fake-lagos' "${slurm_config}"
-grep -q '^  qsa-sim-head:$' "${repo_dir}/docker-compose.qsa-sim.yml"
+grep -A7 '^  qsa-sim-head:$' "${compose_config}" |
+	grep -q '^    container_name: qsa-sim-head$'
 grep -q '^NodeName=fake-iqm-head .*qpm-fake-iqm' "${slurm_config}"
 grep -q '^set root /opt/qfw/openmpi$' "${repo_dir}/modulefiles/openmpi"
 grep -q '^export QFW_SIMULATOR_NODES=nwqsim-head,nwqsim-worker-1,nwqsim-worker-2$' \

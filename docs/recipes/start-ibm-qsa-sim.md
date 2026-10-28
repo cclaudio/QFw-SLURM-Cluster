@@ -48,16 +48,6 @@ docker compose up --build
 
 ### 2. Populate credentials in qsa-sim-head
 
-Prerequisites:
-- Make sure the cluster was deployed with `--qsa-sim` support - i.e. the
-  `qsa-sim-head` container is running. If necessary, redeploy the cluster using
-  the commands below.
-  ```bash
-  ./do_configure.sh --qsa-sim
-  ./do_build.sh
-  ./do_startup.sh
-  ```
-
 Before submiting jobs to `ibm-fake-lagos`, update the `qsa-users.json` and the
 `device-access.yaml` in the `qsa-sim-head` container as below. Make sure the
 `ibm-fake-lagos` fields are populated with the same values you used to start the

@@ -2,7 +2,7 @@
 #
 # Export COMPOSE_FILE from qfw-install.env so the helper scripts, and any
 # docker compose call they make, use the overlay list chosen with
-# ./do_configure.sh (--telemetry, --qsa-sim). A COMPOSE_FILE already set in the
+# ./do_configure.sh (--telemetry). A COMPOSE_FILE already set in the
 # caller's environment takes precedence.
 
 if [ -z "${COMPOSE_FILE:-}" ] && [ -f "${ENV_FILE:-}" ]; then

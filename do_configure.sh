@@ -18,7 +18,6 @@ DEFAULT_MQT_CORE_REF="575acd1b9ca52e4608ccf4833e7d60640913cef4"
 ENV_FILE="${SCRIPT_DIR}/qfw-install.env"
 COMPOSE_ENV_FILE="${SCRIPT_DIR}/.env"
 TELEMETRY=false
-QSA_SIM=false
 
 usage() {
     cat <<EOF
@@ -54,7 +53,6 @@ Options:
   -h, --help           Show this help text
   --telemetry      Start the telemetry stack with the cluster (docker-compose.telemetry.yml)
                    and give every QFw container the QFW_TELEMETRY variables
-  --qsa-sim        Add the qsa-sim-head service node (docker-compose.qsa-sim.yml)
 
 This command prepares the mounted host workspace and writes the defaults used
 by the helper scripts and docker compose into:
@@ -138,10 +136,6 @@ while [ "$#" -gt 0 ]; do
             TELEMETRY=true
             shift
             ;;
-        --qsa-sim)
-            QSA_SIM=true
-            shift
-            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -208,23 +202,20 @@ print_settings() {
     echo "  QFW_CONTAINER_BASE=${BASE_DIR}"
     echo "  MQT_CORE_REPOSITORY=${MQT_CORE_REPOSITORY}"
     echo "  MQT_CORE_REF=${MQT_CORE_REF}"
-    if ${TELEMETRY} || ${QSA_SIM}; then
+    if ${TELEMETRY}; then
         echo "  COMPOSE_FILE=$(compose_files)"
     fi
 }
 
-# With --telemetry or --qsa-sim, compose reads COMPOSE_FILE from the env file,
-# so every do_*.sh and plain `docker compose` call includes the overlays: the
-# stack starts with the cluster and the cluster containers are created with
-# the QFw telemetry variables. docker-compose.override.yml is only picked up
+# With --telemetry, compose reads COMPOSE_FILE from the env file, so every
+# do_*.sh and plain `docker compose` call includes the overlay: the stack
+# starts with the cluster and the cluster containers are created with the
+# QFw telemetry variables. docker-compose.override.yml is only picked up
 # automatically when no file list is given, so it is named here when present.
 compose_files() {
     local files="docker-compose.yml"
     if [ -f "${SCRIPT_DIR}/docker-compose.override.yml" ]; then
         files="${files}:docker-compose.override.yml"
-    fi
-    if ${QSA_SIM}; then
-        files="${files}:docker-compose.qsa-sim.yml"
     fi
     if ${TELEMETRY}; then
         files="${files}:docker-compose.telemetry.yml"
@@ -260,7 +251,7 @@ MQT_CORE_REPOSITORY=${MQT_CORE_REPOSITORY}
 MQT_CORE_REF=${MQT_CORE_REF}
 EOF
 
-if ${TELEMETRY} || ${QSA_SIM}; then
+if ${TELEMETRY}; then
     echo "COMPOSE_FILE=$(compose_files)" >> "${ENV_FILE}"
 fi
 if ${TELEMETRY}; then
