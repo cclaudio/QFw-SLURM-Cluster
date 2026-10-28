@@ -57,9 +57,9 @@ Options:
   --target TARGET
              Select all, directory, nwqsim, iqm, shim, ibm, aws, qsa-sim,
              fake-iqm, backline, or gateway
-             (default: all). backline is opt-in: "all" starts and reports
-             without it, and stops it only when it is running
-             (needs tools/install-backline-venv.sh first)
+             (default: all). qsa-sim and backline are opt-in: "all" starts
+             and reports without them, and stops them only when they are
+             running (backline needs tools/install-backline-venv.sh first)
   --json     Emit one machine-readable status document
   --dry-run  Print the commands without executing them
 EOF
@@ -645,7 +645,6 @@ start_services() {
 	local shim_started=false
 	local ibm_started=false
 	local aws_started=false
-	local qsa_sim_started=false
 	local fake_iqm_started=false
 	local directory_was_ready=false
 	local nwqsim_was_ready=false
@@ -653,7 +652,6 @@ start_services() {
 	local shim_was_ready=false
 	local ibm_was_ready=false
 	local aws_was_ready=false
-	local qsa_sim_was_ready=false
 	local fake_iqm_was_ready=false
 	local gateway_was_ready=false
 
@@ -666,7 +664,6 @@ start_services() {
 		shim_ready >/dev/null 2>&1 && shim_was_ready=true
 		ibm_ready >/dev/null 2>&1 && ibm_was_ready=true
 		aws_ready >/dev/null 2>&1 && aws_was_ready=true
-		qsa_sim_ready >/dev/null 2>&1 && qsa_sim_was_ready=true
 		fake_iqm_ready >/dev/null 2>&1 && fake_iqm_was_ready=true
 		gateway_managed_ready >/dev/null 2>&1 && gateway_was_ready=true
 
@@ -682,9 +679,10 @@ start_services() {
 				stop_fake_iqm || return 1
 				fake_iqm_was_ready=false
 			fi
-			if ${qsa_sim_was_ready}; then
+			# qsa-sim is opt-in, so "all" does not restart it; probe it
+			# only here, where a live one would be stale.
+			if qsa_sim_ready >/dev/null 2>&1; then
 				stop_qsa_sim || return 1
-				qsa_sim_was_ready=false
 			fi
 			if ${aws_was_ready}; then
 				stop_aws || return 1
@@ -754,19 +752,7 @@ start_services() {
 	fi
 	${aws_was_ready} || aws_started=true
 
-	if ! start_qsa_sim; then
-		${aws_started} && stop_aws >/dev/null 2>&1 || true
-		${ibm_started} && stop_ibm >/dev/null 2>&1 || true
-		${shim_started} && stop_shim >/dev/null 2>&1 || true
-		${iqm_started} && stop_iqm >/dev/null 2>&1 || true
-		${nwqsim_started} && stop_nwqsim >/dev/null 2>&1 || true
-		${directory_started} && stop_directory >/dev/null 2>&1 || true
-		return 1
-	fi
-	${qsa_sim_was_ready} || qsa_sim_started=true
-
 	if ! start_fake_iqm; then
-		${qsa_sim_started} && stop_qsa_sim >/dev/null 2>&1 || true
 		${aws_started} && stop_aws >/dev/null 2>&1 || true
 		${ibm_started} && stop_ibm >/dev/null 2>&1 || true
 		${shim_started} && stop_shim >/dev/null 2>&1 || true
@@ -779,7 +765,6 @@ start_services() {
 
 	if ! start_gateway; then
 		${fake_iqm_started} && stop_fake_iqm >/dev/null 2>&1 || true
-		${qsa_sim_started} && stop_qsa_sim >/dev/null 2>&1 || true
 		${aws_started} && stop_aws >/dev/null 2>&1 || true
 		${ibm_started} && stop_ibm >/dev/null 2>&1 || true
 		${shim_started} && stop_shim >/dev/null 2>&1 || true
@@ -831,7 +816,7 @@ service_status() {
 		all|aws) aws_ready ;;
 		esac
 		case "${target}" in
-		all|qsa-sim) qsa_sim_ready ;;
+		qsa-sim) qsa_sim_ready ;;
 		esac
 		case "${target}" in
 		all|fake-iqm) fake_iqm_ready ;;
@@ -897,7 +882,7 @@ service_status() {
 		;;
 	esac
 	case "${target}" in
-	all|qsa-sim)
+	qsa-sim)
 		if qsa_sim_output="$(qsa_sim_ready 2>&1)"; then
 			qsa_sim_status=0
 		else
@@ -951,7 +936,11 @@ values = {
     "fake-iqm": ("Fake IQM", int(sys.argv[17]), sys.argv[18]),
     "gateway": ("Gateway", int(sys.argv[19]), sys.argv[20]),
 }
-selected = list(values) if target == "all" else [target]
+# qsa-sim is opt-in, so the aggregate view leaves it out.
+selected = (
+    [name for name in values if name != "qsa-sim"]
+    if target == "all" else [target]
+)
 
 
 def first_document(text):
@@ -1061,7 +1050,9 @@ stop_services() {
 	if ${dry_run} || backline_ready >/dev/null 2>&1; then
 		stop_backline || status=1
 	fi
-	stop_qsa_sim || status=1
+	if ${dry_run} || qsa_sim_ready >/dev/null 2>&1; then
+		stop_qsa_sim || status=1
+	fi
 	stop_aws || status=1
 	stop_ibm || status=1
 	stop_shim || status=1
