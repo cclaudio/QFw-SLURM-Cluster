@@ -8,8 +8,8 @@ integration expects, and it works offline against the NWQSim QPM. A
 workflow manager such as Prefect only submits the job, waits for it and
 reads a file back; it holds no QFw state of its own.
 
-The cluster ships two files for it under `prefect/`, installed on the shared
-workspace at `/workspace/qfw-container-base/qfw-prefect/` by
+The cluster ships two files for it under `prefect/`, installed in the Prefect
+workspace at `/workspace/qfw-container-base/qfw-prefect/bin/` by
 `tools/provision-prefect.sh`:
 
 | File | Role |
@@ -44,8 +44,8 @@ As an application user in `slurmctld`, sample a five-qubit GHZ circuit:
 
 ```bash
 docker exec -u user-a slurmctld \
-  /workspace/qfw-container-base/qfw-prefect-venv/bin/python \
-  /workspace/qfw-container-base/qfw-prefect/qfw_slurm_sampler.py \
+  /workspace/qfw-container-base/qfw-prefect/venv/bin/python \
+  /workspace/qfw-container-base/qfw-prefect/bin/qfw_slurm_sampler.py \
   --qpu nwqsim --qubits 5 --shots 1024
 ```
 
@@ -79,7 +79,7 @@ A Prefect task, or any Python running on the controller with `sbatch` and
 
 ```python
 import sys
-sys.path.insert(0, "/workspace/qfw-container-base/qfw-prefect")
+sys.path.insert(0, "/workspace/qfw-container-base/qfw-prefect/bin")
 from qfw_slurm_sampler import run_sampler_job
 
 record = run_sampler_job(circuit, shots=100_000, qpu="nwqsim",
@@ -94,9 +94,26 @@ headroom for the QPM's transpilation, and the shot count. The record carries
 the counts, the service and reservation ids, the Slurm job id and the job
 directory.
 
-For the SQD closed loop, this call replaces the in-process `QFwResource`
-sampling in the walker. The counts convert to a `BitArray` the same way the
-workflow already does for its other sources.
+For workflows that need a custom application-side sampler, pass its path with
+`sampler` and any additional command-line arguments with `sampler_args`.
+The submitter safely quotes these arguments before rendering the Slurm job.
+
+For example:
+
+```python
+record = run_sampler_job(
+    circuit,
+    shots=shots,
+    qpu="ibm-156-nh",
+    work_dir="/workspace/home/user-a/qfw_jobs",
+    sampler="/path/to/custom_sampler.py",
+    sampler_args=["--option", "value"],
+)
+```
+
+For the SQD closed loop, the walker uses this call to submit its quantum sampling
+stage through QFw-SLURM. The returned counts are converted to a BitArray before
+the workflow continues with recovery and SBD.
 
 ## What the Job Carries
 
@@ -104,6 +121,6 @@ The rendered script holds, in this order: the Slurm directives for the
 partition, account, one node, one task, walltime and output files; the six
 qfw-slurm options; QFw activation with the image's prefix and venv; a
 `QFW_RUN_BASE_DIR` inside the job directory; `qfw-setup`; the sampler under
-`qfw-srun`; and `qfw-teardown` on exit. Nothing in it is specific to the
-sampler, so the same shape serves any QFw application a workflow wants to
-launch under a reservation.
+`qfw-srun`; and `qfw-teardown` on exit. The job structure is not specific to
+a particular sampler, so the same shape serves any QFw application a workflow
+wants to launch under a reservation.

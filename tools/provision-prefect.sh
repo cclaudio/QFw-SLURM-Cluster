@@ -2,20 +2,23 @@
 
 # Provision the qcsc-prefect SQD closed-loop environment on the running
 # cluster: a dedicated Python venv beside the image's QFw venv, the
-# qcsc-prefect checkout, and the native SBD solver, all owned by an
-# application user on the shared workspace so they survive a container
-# recreate. Rerunnable. See docs/recipes/run-prefect-sqd-closed-loop.md.
+# qcsc-prefect checkout, the native SBD solver and the quantum-stage sampler,
+# all inside one workspace on the shared mount that root creates and the
+# application user owns, so they survive a container recreate and never
+# depend on who owns the mount root (a Linux host keeps the host user's uid
+# there). Rerunnable. See docs/recipes/run-prefect-sqd-closed-loop.md.
 
 set -euo pipefail
 
 user="${QFW_PREFECT_USER:-user-a}"
 container="${QFW_PREFECT_CONTAINER:-slurmctld}"
-venv="${QFW_PREFECT_VENV:-/workspace/qfw-container-base/qfw-prefect-venv}"
-checkout="${QCSC_PREFECT_DIR:-/workspace/qfw-container-base/qcsc-prefect}"
+workspace="${QFW_PREFECT_ROOT:-/workspace/qfw-container-base/qfw-prefect}"
+venv="${QFW_PREFECT_VENV:-${workspace}/venv}"
+checkout="${QCSC_PREFECT_DIR:-${workspace}/qcsc-prefect}"
 repo="${QCSC_PREFECT_REPO:-https://github.com/qiskit-community/qcsc-prefect.git}"
-# The merge of qiskit-community/qcsc-prefect#40, the QFw support this recipe
+# The merge of qiskit-community/qcsc-prefect#48, the QFw support this recipe
 # was validated with. Override to follow a newer commit or branch.
-ref="${QCSC_PREFECT_REF:-11ad329247784e5c9a102a2e09e90128c432b084}"
+ref="${QCSC_PREFECT_REF:-96fed8eed8aa00966342951ec1e9957d5f40fd80}"
 image_venv="${QFW_IMAGE_VENV:-/opt/openqse/qfw-venv}"
 prefix="${QFW_PREFECT_PREFIX:-/opt/openqse/qfw}"
 
@@ -25,7 +28,6 @@ die() {
 }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-shared_root="${QFW_CONTAINER_BASE:-${script_dir}/shared-dir}"
 
 docker inspect --format '{{.State.Running}}' "${container}" 2>/dev/null |
 	grep -qx true || die "container ${container} is not running"
@@ -33,15 +35,32 @@ docker exec "${container}" id -u "${user}" >/dev/null 2>&1 ||
 	die "user ${user} does not exist in ${container}; run tools/provision-qfw-cluster.sh first"
 
 echo "qfw-prefect: provisioning as ${user} in ${container}"
+echo "qfw-prefect:   workspace ${workspace}"
 echo "qfw-prefect:   venv      ${venv}"
 echo "qfw-prefect:   checkout  ${checkout} at ${ref}"
 
+# The workspace itself is the one thing done as root: the shared mount's
+# root belongs to whoever owns it on the host, so the application user can
+# create nothing there directly. Only the workspace directory and its bin
+# change hands; nothing below them is touched.
+docker exec "${container}" bash -c '
+	set -e
+	mkdir -p "$1" "$1/bin"
+	chown "$2:$2" "$1" "$1/bin"
+	chmod 0755 "$1" "$1/bin"
+' _ "${workspace}" "${user}"
+docker exec -u "${user}" "${container}" test -w "${workspace}" ||
+	die "${workspace} is not writable by ${user} in ${container}"
+
 # The quantum-stage sampler and its submitter, read by jobs on every node
-# from the shared workspace (docs/recipes/run-quantum-stage-through-qfw-slurm.md).
-install -d "${shared_root}/qfw-prefect"
-install -m 0644 "${script_dir}"/prefect/qfw_sampler.py \
-	"${script_dir}"/prefect/qfw_slurm_sampler.py "${shared_root}/qfw-prefect/"
-echo "qfw-prefect:   sampler   ${shared_root}/qfw-prefect"
+# (docs/recipes/run-quantum-stage-through-qfw-slurm.md). Written as the
+# user, since the workspace is theirs.
+for name in qfw_sampler.py qfw_slurm_sampler.py; do
+	docker exec -i -u "${user}" "${container}" \
+		bash -c 'cat >"$1" && chmod 0644 "$1"' _ "${workspace}/bin/${name}" \
+		<"${script_dir}/prefect/${name}"
+done
+echo "qfw-prefect:   sampler   ${workspace}/bin"
 
 docker exec -i -u "${user}" \
 	-e "PREFECT_VENV=${venv}" \
@@ -103,7 +122,8 @@ uv pip install --quiet --python "${PREFECT_VENV}" --override "${override}" \
 
 # 4. qcsc-prefect, the same way its tutorial installs it: the four framework
 #    packages without dependencies, then the workflow utility and the SBD
-#    workflow, which pull Prefect, Ray, ffsim, pyscf and qiskit-addon-sqd.
+#    workflow with its optional Ray task runner, which pulls Prefect, Ray,
+#    ffsim, pyscf and qiskit-addon-sqd.
 say "installing the qcsc-prefect packages"
 uv pip install --quiet --python "${PREFECT_VENV}" --no-deps \
 	--override "${override}" \
@@ -114,12 +134,14 @@ uv pip install --quiet --python "${PREFECT_VENV}" --no-deps \
 say "installing the SBD workflow and its dependencies"
 # pydantic_numpy 9 is the first release that imports under NumPy 2.5; the
 # workflow leaves it unpinned, and an older release already present would
-# otherwise satisfy it.
+# otherwise satisfy it. Prefect 3.8.8's server still passes min_items to
+# FastAPI's Body(), which FastAPI dropped after 0.149, inside the range
+# Prefect allows; hold FastAPI where the server starts.
 uv pip install --quiet --python "${PREFECT_VENV}" -c "${base}" \
 	--override "${override}" \
-	"pydantic_numpy>=9" \
+	"pydantic_numpy>=9" "fastapi<0.150" \
 	-e "${QCSC_DIR}/algorithms/qcsc_workflow_utility" \
-	-e "${QCSC_DIR}/algorithms/sbd"
+	-e "${QCSC_DIR}/algorithms/sbd[ray,qfw]"
 
 # 5. ffsim's wheel must run on this CPU. On some aarch64 hosts it does not
 #    (Illegal instruction), and the tutorial's remedy is a source build.

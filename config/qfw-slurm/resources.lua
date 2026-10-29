@@ -7,6 +7,8 @@ return {
 		["aws-ionq-aria-1"] = "shim-aws-qpm",
 		["aws-rigetti-ankaa"] = "shim-aws-qpm",
 		["fake-iqm-20q"] = "fake-iqm",
+		["backline-local"] = "backline-local",
+		["ibm-fake-lagos"] = "shim-ibm-fake-lagos",
 	},
 	partitions = {
 		normal = {
@@ -18,6 +20,8 @@ return {
 				["aws-ionq-aria-1"] = true,
 				["aws-rigetti-ankaa"] = true,
 				["fake-iqm-20q"] = true,
+				["backline-local"] = true,
+				["ibm-fake-lagos"] = true,
 			},
 		},
 	},

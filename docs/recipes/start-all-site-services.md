@@ -2,8 +2,14 @@
 
 This is the canonical administrator workflow. It starts the directory service
 on `slurmctld`, a three-node NWQSim DVM and QPMd, the IQM QPMd, IQM shim QPMd,
-IBM shim QPMd, AWS QPMd, fake IQM QPMd, and QFw Slurm gateway. The QPMd
-service nodes remain outside application allocations.
+IBM shim QPMd, AWS QPMd, fake IQM QPMd, and QFw Slurm gateway. The QPMd service
+nodes remain outside application allocations.
+
+The QSA simulator QPMd (`qsa-sim-head`) is opt-in: the `all` target neither
+starts nor reports it. Start it with
+`qfw-site-services start --target qsa-sim` (see
+[start-ibm-qsa-sim.md](start-ibm-qsa-sim.md)); `stop` stops it when it is
+running.
 
 ## Prerequisites
 
