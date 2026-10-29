@@ -9,7 +9,7 @@ DEFAULT_IMAGE_TAG="rocky10.1"
 DEFAULT_SLURM_TAG="slurm-25-05-0-1"
 DEFAULT_QFW_BUILD_JOBS="4"
 DEFAULT_QFW_REPOSITORY="https://github.com/openQSE/QFw.git"
-DEFAULT_QFW_REF="62a0b078fea0b7c41291cf8b8af64df40137632f"
+DEFAULT_QFW_REF="55d13a2096c1789df1404a63f46e9111f3ddf11c"
 DEFAULT_QFW_SLURM_REPOSITORY="https://github.com/openQSE/qfw-slurm.git"
 DEFAULT_QFW_SLURM_REF="main"
 DEFAULT_MQT_CORE_REPOSITORY="https://github.com/munich-quantum-toolkit/core.git"
@@ -203,21 +203,24 @@ print_settings() {
     echo "  MQT_CORE_REPOSITORY=${MQT_CORE_REPOSITORY}"
     echo "  MQT_CORE_REF=${MQT_CORE_REF}"
     if ${TELEMETRY}; then
-        echo "  COMPOSE_FILE=$(telemetry_compose_files)"
+        echo "  COMPOSE_FILE=$(compose_files)"
     fi
 }
 
 # With --telemetry, compose reads COMPOSE_FILE from the env file, so every
-# do_*.sh and plain `docker compose` call includes the telemetry overlay: the
-# stack starts with the cluster and the cluster containers are created with
-# the QFw telemetry variables. docker-compose.override.yml is only picked up
+# do_*.sh and plain `docker compose` call includes the overlay: the stack
+# starts with the cluster and the cluster containers are created with the
+# QFw telemetry variables. docker-compose.override.yml is only picked up
 # automatically when no file list is given, so it is named here when present.
-telemetry_compose_files() {
+compose_files() {
     local files="docker-compose.yml"
     if [ -f "${SCRIPT_DIR}/docker-compose.override.yml" ]; then
         files="${files}:docker-compose.override.yml"
     fi
-    echo "${files}:docker-compose.telemetry.yml"
+    if ${TELEMETRY}; then
+        files="${files}:docker-compose.telemetry.yml"
+    fi
+    echo "${files}"
 }
 
 validate_image_settings
@@ -249,10 +252,10 @@ MQT_CORE_REF=${MQT_CORE_REF}
 EOF
 
 if ${TELEMETRY}; then
-    cat >> "${ENV_FILE}" <<EOF
-COMPOSE_FILE=$(telemetry_compose_files)
-QFW_GRAFANA_PORT=3000
-EOF
+    echo "COMPOSE_FILE=$(compose_files)" >> "${ENV_FILE}"
+fi
+if ${TELEMETRY}; then
+    echo "QFW_GRAFANA_PORT=3000" >> "${ENV_FILE}"
 fi
 
 cp "${ENV_FILE}" "${COMPOSE_ENV_FILE}"

@@ -17,17 +17,17 @@ manual setup becomes repeatable:
 | `tools/prefect-sqd` | Start the Prefect server, create the blocks, submit runs, stop. |
 | `docker-compose.prefect.yml` | Publish the Prefect UI on the Docker host. |
 
-Everything runs as a non-root application user. The Prefect server, the
-served deployment and the workflow process live in `slurmctld`; the SBD
-solver runs on the `normal` partition through `sbatch` and `srun`.
+The workflow runtime runs as a non-root application user. The Prefect server,
+the served deployment, and the workflow process live in `slurmctld`; quantum
+stages using `quantum_source=qfw` and the SBD solver run on the `normal`
+partition as Slurm jobs.
 
 ## Prerequisites
 
-- The cluster is running and provisioned (`tools/provision-qfw-cluster.sh`),
-  so `user-a` exists with the `qfw-test` Slurm account.
+- The cluster is running.
 - The Docker host can reach PyPI and GitHub from inside `slurmctld`.
 - The site service plane is not needed for the `random` quantum source.
-  See [The qfw quantum source](#the-qfw-quantum-source) for what the real
+  See [The qfw Quantum Source](#the-qfw-quantum-source) for what the real
   QFw path needs.
 
 ## Publish the Prefect UI
@@ -37,29 +37,122 @@ from the Docker host, append the Prefect compose file to `COMPOSE_FILE` in
 `.env`:
 
 ```text
-COMPOSE_FILE=docker-compose.yml:docker-compose.override.yml:docker-compose.telemetry.yml:docker-compose.prefect.yml
+COMPOSE_FILE=docker-compose.yml:docker-compose.telemetry.yml:docker-compose.prefect.yml
 ```
 
-The mapping binds `127.0.0.1:4200` and takes effect when `slurmctld` is
-recreated, which also means running `tools/provision-qfw-cluster.sh` and
-`qfw-site-services start` again. Without it, drive the workflow from the
-command line as shown below.
+The mapping binds `127.0.0.1:4200` on the Docker host and takes effect when
+`slurmctld` is recreated, which also means running
+`tools/provision-qfw-cluster.sh` and restarting the QFw site services again.
+
+If the cluster is running on a remote host, forward the Prefect UI port from
+your local machine:
+
+```bash
+ssh -L 4200:127.0.0.1:4200 <user>@<remote-host>
+```
+
+Then open `http://127.0.0.1:4200` in a local browser. If the cluster is
+running locally, open the same URL directly without SSH port forwarding.
+
+The Prefect UI can be used to follow flow and task execution and inspect the
+SQD walkers while their quantum and SBD stages run through Slurm. A workflow
+run can also be submitted from the deployment page with **Run → Custom run**
+using the parameters described in the upstream tutorial. The command-line
+workflow shown below remains available when the UI is not needed.
+
+## Configure QFw Device Access
+
+This section is required when using `quantum_source=qfw`.
+
+Before provisioning the cluster, review:
+
+- `config/device-access.yaml`
+- `config/qpu-users.json`
+
+Select the QFw device that should execute the quantum sampling stages and
+ensure that its provider configuration and credentials are available before
+running `tools/provision-qfw-cluster.sh`.
+
+The cluster configuration includes `ibm-156-nh` as an IBM Quantum example.
+For this device, set `provider-device-id` in `config/device-access.yaml` to
+the IBM Quantum backend that should execute the circuits.
+
+For example:
+
+```yaml
+ibm-156-nh:
+  provider: ibm
+  provider-device-id: <ibm-backend-name>
+  resource-type: IBMQiskitRuntimeService
+  url: https://quantum.cloud.ibm.com/api/v1
+  credential-db: qpu-users.json
+  libraries:
+    - qrmi
+  preference: qrmi
+  execution-owner: qrmi
+  caps:
+    run_circuit: [qrmi]
+    get_backend_info: [qrmi]
+    get_task_timing: [qrmi]
+    get_task_metadata: [qrmi]
+```
+
+The corresponding entry in `config/qpu-users.json` must contain enabled IBM
+Quantum credentials for the Slurm application user and `ibm-156-nh`,
+including the API key and service CRN.
+
+For another QFw-supported device, configure the corresponding logical device,
+provider mapping, and credentials required by that provider.
+
+Configure these files before running `tools/provision-qfw-cluster.sh`.
+
+> **Important:** Cluster provisioning installs these configuration files into
+> the QFw service and compute containers. Editing the copies under `config/`
+> afterward does not automatically update an already-provisioned environment.
+> If either file changes later, reprovision or synchronize the updated files
+> to the running containers and restart the QFw site services.
 
 ## Provision the Workflow Environment
 
-From the Docker host:
+First provision the QFw-SLURM cluster from the Docker host:
 
 ```bash
 cd /path/to/QFw-SLURM-Cluster
+tools/provision-qfw-cluster.sh
+```
+
+To start the QFw site services, enter the cluster environment:
+
+```bash
+./do_ssh.sh
+```
+
+Then, from inside the cluster environment:
+
+```bash
+qfw-site-services start
+```
+
+Exit back to the Docker host and provision the Prefect workflow environment:
+
+```bash
+exit
 tools/provision-prefect.sh
 ```
 
-The script is safe to rerun. Its one root step creates the Prefect
-workspace, `/workspace/qfw-container-base/qfw-prefect` (`QFW_PREFECT_ROOT`
-overrides), and hands it to `user-a`: the shared mount's root belongs to
-whoever owns it on the Docker host, so an application user cannot create
-anything there directly. Everything else runs as `user-a` inside that
-workspace:
+Provision the QFw-SLURM cluster before the Prefect environment so that
+`user-a` and the Slurm environment are available before the workflow
+environment is created.
+
+For `quantum_source=qfw`, provisioning also installs the QFw device and
+credential configuration required by the quantum stages.
+
+`tools/provision-prefect.sh` is safe to rerun. Its one root step creates the
+Prefect workspace, `/workspace/qfw-container-base/qfw-prefect`
+(`QFW_PREFECT_ROOT` overrides), and hands it to `user-a`: the shared mount's
+root belongs to whoever owns it on the Docker host, so an application user
+cannot create anything there directly. Everything else runs as `user-a`
+inside that workspace:
 
 1. Clones `qcsc-prefect` to `qcsc-prefect/` at the commit this recipe was
    validated with (`QCSC_PREFECT_REF` overrides).
@@ -97,10 +190,41 @@ to use threads instead.
 `blocks` writes `/workspace/home/user-a/sbd_blocks.toml` for this cluster
 (account `qfw-test`, partition `normal`, one node, `SBD_MPIPROCS` ranks,
 `SBD_WALLTIME`), creates the Slurm SBD blocks from it, registers the
-`QFwResource` block type from the main thread and creates the `qfw-runner`
-block for `QFW_PREFECT_DEVICE` (default `ornl-iqm-20q`).
+`QFwResource` block type from the main thread, and creates the `qfw-runner`
+block for `QFW_PREFECT_DEVICE` (default `ornl-iqm-20q`). The workflow still
+loads this block for its QFw configuration, while quantum sampling with
+`quantum_source=qfw` is submitted through `run_sampler_job()` and QFw-SLURM.
+
+Create the QFw resource block for the device that should execute the quantum
+stages.
+
+For the IBM configuration included with this cluster:
+
+```bash
+QFW_PREFECT_DEVICE=ibm-156-nh tools/prefect-sqd blocks
+```
+
+The command should report:
+
+```text
+Device ID: ibm-156-nh
+```
+
+For another configured QFw device:
+
+```bash
+QFW_PREFECT_DEVICE=<device-id> tools/prefect-sqd blocks
+```
 
 ## Run the Workflow
+
+The workflow supports both a local random sampling path and quantum execution
+through QFw-SLURM.
+
+### Random sampling
+
+Use the `random` source to validate the Prefect orchestration and classical
+SQD stages without quantum hardware:
 
 ```bash
 tools/prefect-sqd run random 10000 1
@@ -122,58 +246,81 @@ land under `/workspace/home/user-a/sbd_jobs/`. The run's energies are in the
 `sqd-telemetry` artifact, which the UI shows under the flow run or
 `prefect artifact inspect sqd-telemetry` prints.
 
-On this cluster the command above finishes in about half a minute: the four
-walkers run in Ray workers, each SBD job spends about five seconds on its
-node, and the four walkers report energies near -134.77 Ha for N2 with the
-fast solver preset.
+On this cluster the random-source command finishes in about half a minute:
+the four walkers run in Ray workers, each SBD job spends about five seconds
+on its node, and the four walkers report energies near -134.77 Ha for N2 with
+the fast solver preset.
 
 With the UI published, the same run starts from the deployment page with
 **Run → Custom run** and the tutorial's parameter table.
 
-## The qfw Quantum Source
+### QFw quantum sampling
 
-With `quantum_source=qfw`, the workflow loads the `qfw-runner` block and
-samples through QFw's QRMI driver **inside the workflow process**: it reads
-the device-access file named in the block, resolves the calling user's
-credentials from that file's credential database, opens the QRMI resource
-and runs the circuit. It does not reserve the QPM through qfw-slurm, does not
-talk to the site QPM service, and leaves no trace in QFw's telemetry.
-
-That has consequences on this cluster:
-
-- The site device-access file and credential database under
-  `/etc/openqse/qfw/device` are root-only. The workflow user needs its own
-  readable device-access file whose `credential-db` holds that user's
-  records. Point the block at it with `QFW_PREFECT_DEVICE_ACCESS` before
-  `tools/prefect-sqd blocks`.
-- Only QRMI devices work: `ornl-iqm-20q` (needs the IQM tunnel) and
-  `ibm-156-nh` (needs an IBM key). The NWQSim simulator, the fake IQM QPM and
-  the QDMI devices, Braket included, cannot be selected.
-- Reset mitigation is off in the run command; the tutorial recommends that
-  for direct-access systems.
-
-The cluster's gitignored IQM files, `shared-dir/iqm-device-access.yaml` and
-`shared-dir/iqm-creds.json`, already form such a pair for `root` through the
-IQM tunnel. With the tunnel up, run the workflow process as root against
-them. The Prefect server keeps running as `user-a`; only the served
-deployment changes hands, and root's SBD work directory must be on the
-shared workspace because root's home is not:
+To execute the quantum sampling stages through QFw-SLURM, use:
 
 ```bash
-tools/prefect-sqd stop serve
-QFW_PREFECT_USER=root QFW_PREFECT_DEVICE=ornl-iqm-20q \
-  QFW_PREFECT_DEVICE_ACCESS=/mnt/iqm-device-access.yaml \
-  SBD_WORK_DIR=/workspace/qfw-container-base/sbd_jobs \
-  tools/prefect-sqd blocks
-QFW_PREFECT_USER=root PREFECT_RAY_NUM_CPUS=4 tools/prefect-sqd start
-QFW_PREFECT_USER=root tools/prefect-sqd run qfw 10000 1
+tools/prefect-sqd run qfw 10000 1
 ```
 
-The SBD jobs of that run are then submitted by root. Afterwards,
-`QFW_PREFECT_USER=root tools/prefect-sqd stop serve` and a plain `blocks`
-and `start` return the deployment to `user-a`. This path has not been
-exercised on the cluster yet; the tunnel was down when the recipe was
-written.
+With `quantum_source=qfw`, each walker generates its LUCJ circuit, submits the
+sampling stage as a Slurm quantum job, executes it through the selected QFw
+device, retrieves the samples, and then continues with configuration recovery,
+postselection, subsampling, and the Slurm-based SBD solver.
+
+Quantum and classical Slurm jobs can be monitored with:
+
+```bash
+docker exec slurmctld squeue -u user-a
+docker exec slurmctld sacct -u user-a -X \
+  --format=JobID,JobName%20,State,ExitCode,Elapsed,NodeList
+```
+
+## The qfw Quantum Source
+
+With `quantum_source=qfw`, each SQD walker submits its quantum sampling stage
+as a Slurm job through `qfw_slurm_sqd_sampler.py`. The Slurm job carries the
+qfw-slurm reservation options, runs the SQD sampler under `qfw-srun`, and
+executes the circuit through `QFwBackend`.
+
+`tools/prefect-sqd` sets `QFW_SLURM_BIN` to the provisioned `bin/` directory
+under the Prefect workspace by default. This directory contains
+`qfw_slurm_sqd_sampler.py`, installed by `tools/provision-prefect.sh`. Set
+`QFW_SLURM_BIN` explicitly only when using a different helper location.
+
+The workflow process itself does not hold the QFw reservation. Instead:
+
+1. Prefect creates the LUCJ circuit and applies the ffsim pre-initialization
+   required before QPY serialization.
+2. `qfw_slurm_sqd_sampler.py` writes the circuit to the job directory and
+   submits a Slurm job.
+3. qfw-slurm reserves the selected QPM for the allocation.
+4. The SQD sampler runs under `qfw-srun`, obtains the device-specific
+   `QFwBackend.target`, performs target-aware transpilation, and executes the
+   circuit.
+5. The sampler writes the counts record back to the shared job directory.
+6. The Prefect walker converts the returned counts to a `BitArray` and
+   continues with recovery and the SBD stage.
+
+For IBM devices accessed through QRMI, the corresponding entry in
+`config/device-access.yaml` must include:
+
+```yaml
+caps:
+  run_circuit: [qrmi]
+  get_backend_info: [qrmi]
+  get_task_timing: [qrmi]
+  get_task_metadata: [qrmi]
+```
+
+`get_backend_info` allows `QFwBackend.target` to obtain the device-specific
+target through the QPM telemetry path.
+
+The SQD path uses the generic `run_sampler_job()` helper with a custom sampler
+and `sampler_args` to pass the SQD transpilation options into the Slurm job.
+
+The QFw-SLURM SQD path has been validated end to end with an IBM Quantum
+device accessed through QRMI. Other QFw-supported devices may be used when
+their QPM provides the backend target required for SQD transpilation.
 
 ## Stop
 

@@ -224,7 +224,7 @@ ARG QFW_BUILD_JOBS=4
 # The image contains a complete release installation. A checkout mounted under
 # QFW_BASE remains an optional developer override built by do_qfw_build.sh.
 ARG QFW_REPOSITORY=https://github.com/openQSE/QFw.git
-ARG QFW_REF=62a0b078fea0b7c41291cf8b8af64df40137632f
+ARG QFW_REF=55d13a2096c1789df1404a63f46e9111f3ddf11c
 ARG QFW_DEFW_REPOSITORY=
 ARG QFW_SLURM_REPOSITORY=https://github.com/openQSE/qfw-slurm.git
 ARG QFW_SLURM_REF=main
@@ -623,6 +623,10 @@ COPY tools/qfw-site-services /usr/local/sbin/qfw-site-services
 COPY man/man8/qfw-site-services.8 /usr/local/share/man/man8/qfw-site-services.8
 RUN chmod 0755 /usr/local/sbin/qfw-site-services \
     && chmod 0644 /usr/local/share/man/man8/qfw-site-services.8
+RUN dnf -y install tcsh \
+    && dnf clean all \
+    && rm -rf /var/cache/yum \
+    && uv pip install --system Jinja2
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 CMD ["slurmdbd"]

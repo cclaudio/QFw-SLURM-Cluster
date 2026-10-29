@@ -16,9 +16,9 @@ workspace="${QFW_PREFECT_ROOT:-/workspace/qfw-container-base/qfw-prefect}"
 venv="${QFW_PREFECT_VENV:-${workspace}/venv}"
 checkout="${QCSC_PREFECT_DIR:-${workspace}/qcsc-prefect}"
 repo="${QCSC_PREFECT_REPO:-https://github.com/qiskit-community/qcsc-prefect.git}"
-# The merge of qiskit-community/qcsc-prefect#40, the QFw support this recipe
+# The merge of qiskit-community/qcsc-prefect#48, the QFw support this recipe
 # was validated with. Override to follow a newer commit or branch.
-ref="${QCSC_PREFECT_REF:-11ad329247784e5c9a102a2e09e90128c432b084}"
+ref="${QCSC_PREFECT_REF:-96fed8eed8aa00966342951ec1e9957d5f40fd80}"
 image_venv="${QFW_IMAGE_VENV:-/opt/openqse/qfw-venv}"
 prefix="${QFW_PREFECT_PREFIX:-/opt/openqse/qfw}"
 
@@ -122,7 +122,8 @@ uv pip install --quiet --python "${PREFECT_VENV}" --override "${override}" \
 
 # 4. qcsc-prefect, the same way its tutorial installs it: the four framework
 #    packages without dependencies, then the workflow utility and the SBD
-#    workflow, which pull Prefect, Ray, ffsim, pyscf and qiskit-addon-sqd.
+#    workflow with its optional Ray task runner, which pulls Prefect, Ray,
+#    ffsim, pyscf and qiskit-addon-sqd.
 say "installing the qcsc-prefect packages"
 uv pip install --quiet --python "${PREFECT_VENV}" --no-deps \
 	--override "${override}" \
@@ -140,7 +141,7 @@ uv pip install --quiet --python "${PREFECT_VENV}" -c "${base}" \
 	--override "${override}" \
 	"pydantic_numpy>=9" "fastapi<0.150" \
 	-e "${QCSC_DIR}/algorithms/qcsc_workflow_utility" \
-	-e "${QCSC_DIR}/algorithms/sbd"
+	-e "${QCSC_DIR}/algorithms/sbd[ray,qfw]"
 
 # 5. ffsim's wheel must run on this CPU. On some aarch64 hosts it does not
 #    (Illegal instruction), and the tutorial's remedy is a source build.

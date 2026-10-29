@@ -172,7 +172,7 @@ The installer wrote the settings twice, with the same values:
 
 The values are the overlay's demonstration settings: the `otlp` profile, the
 endpoint `http://qpm-server:4318`, every trace sampled, the transport spans on,
-the logs tier at `debug`. For production keep the metrics on and turn the
+the logs tier at `debug`, the vendor timeline on. For production keep the metrics on and turn the
 rest down: `QFW_TELEMETRY_SAMPLE=off` or a ratio, `QFW_TELEMETRY_LOGS=error`;
 the measured cost of each setting is in QFw's `docs/design/benchmarking.md`.
 
