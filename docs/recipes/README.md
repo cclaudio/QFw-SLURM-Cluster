@@ -6,6 +6,7 @@ using the virtual QFw Slurm cluster.
 | Goal | Recipe |
 | --- | --- |
 | Build and start the cluster | [Build and start the cluster](build-and-start-cluster.md) |
+| Build and run licensed GAMESS | [Build and run GAMESS](build-and-run-gamess.md) |
 | Start the complete site service plane | [Start all site services](start-all-site-services.md) |
 | Start only the directory and NWQSim QPMd | [Start the NWQSim QPM](start-nwqsim-qpm.md) |
 | Start only the directory and IQM QPMd | [Start the IQM QPM](start-iqm-qpm.md) |

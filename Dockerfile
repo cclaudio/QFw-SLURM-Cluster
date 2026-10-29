@@ -628,6 +628,10 @@ COPY tools/qfw-site-services /usr/local/sbin/qfw-site-services
 COPY man/man8/qfw-site-services.8 /usr/local/share/man/man8/qfw-site-services.8
 RUN chmod 0755 /usr/local/sbin/qfw-site-services \
     && chmod 0644 /usr/local/share/man/man8/qfw-site-services.8
+RUN dnf -y install tcsh \
+    && dnf clean all \
+    && rm -rf /var/cache/yum \
+    && uv pip install --system Jinja2
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 CMD ["slurmdbd"]
