@@ -164,6 +164,13 @@ The AWS service is an aggregate QPM. Both `aws-ionq-aria-1` and
 requires the shim to bind the reservation target to the corresponding AWS-QDMI
 device session.
 
+As installed, the `aws` entry is a placeholder, so `shim-aws-qpm` cannot run
+circuits yet. Both public names reserve that service, and it serves the `aws`
+entry. QFw's Braket profile opens a session only when `provider-device-id` is a
+Braket device ARN, and this entry has `aws`. A working AWS line needs a real
+device entry, such as SV1 or Cepheus as in QFw's
+`examples/qfw_shim_device_access.yaml`.
+
 The relative credential path resolves beside `device-access.yaml` as
 `/etc/openqse/qfw/device/qpu-users.json`.
 
