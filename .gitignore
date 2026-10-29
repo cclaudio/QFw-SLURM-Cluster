@@ -40,7 +40,6 @@ docker-compose.override.yml
 
 # MQT Core developer override
 /shared-dir/mqt-core/
-/shared-dir/mqt-cc-venv/
 
 # Licensed GAMESS source, build products, and calculation output.
 /shared-dir/gamess/
@@ -48,4 +47,3 @@ docker-compose.override.yml
 # ElectroBoy local runtime state
 .electroboy/local/
 .electroboy/shared/runs/*/progress/
-
