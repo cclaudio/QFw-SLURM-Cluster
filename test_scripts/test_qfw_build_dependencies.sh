@@ -50,6 +50,17 @@ for qrmi in pinned fallback unpinned; do
     ! grep -Fq "mqt-cc-venv" "${UV_LOG}"
 done
 
+touch "${QFW_BASE}/QFw/setup/pulser-requirements.txt"
+: >"${UV_LOG}"
+bash -euo pipefail "${temporary}/remote.sh" >"${temporary}/output" 2>&1
+expected="<pip><install><-r><${QFW_BASE}/QFw/setup/build-requirements.txt><-r><${QFW_BASE}/QFw/setup/requirements.txt><-r><${QFW_BASE}/QFw/setup/qdmi-requirements.txt><-r><${QFW_BASE}/QFw/setup/pulser-requirements.txt><--override><${QFW_BASE}/QFw/setup/overrides.txt><qrmi>"
+if ! grep -Fxq "${expected}" "${UV_LOG}"; then
+    echo "Pulser requirements were not resolved with the rest:" >&2
+    cat "${UV_LOG}" >&2
+    exit 1
+fi
+rm "${QFW_BASE}/QFw/setup/pulser-requirements.txt"
+
 rm "${QFW_BASE}/QFw/setup/overrides.txt"
 : >"${UV_LOG}"
 if bash -euo pipefail "${temporary}/remote.sh" >"${temporary}/output" 2>&1; then
@@ -69,4 +80,4 @@ fi
 grep -Fq "No QDMI requirements at ${QFW_BASE}/QFw/setup/qdmi-requirements.txt" "${temporary}/output"
 [ ! -s "${UV_LOG}" ]
 
-echo "QFw dependency install passed: pinned, fallback, unpinned, missing file, paths with spaces"
+echo "QFw dependency install passed: pinned, fallback, unpinned, Pulser, missing file, paths with spaces"
