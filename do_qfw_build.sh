@@ -193,12 +193,20 @@ if [ "${QFW_SKIP_VENV}" != "true" ]; then
     else
         echo "No QRMI version pin available; installing unpinned qrmi" >&2
     fi
+    # The Pulser frontend's requirements, in QFw checkouts that have them.
+    # The list is expanded with ${...+...} below because bash 3.2, which the
+    # host-side build test runs this under, rejects an empty array under set -u.
+    pulser_requirements=()
+    if [ -f "${QFW_SRC}/setup/pulser-requirements.txt" ]; then
+        pulser_requirements=(-r "${QFW_SRC}/setup/pulser-requirements.txt")
+    fi
     # QHW packages are copied into site-packages. QFw's requirements supply
     # their dependencies, including jsonschema.
     uv pip install \
         -r "${QFW_SRC}/setup/build-requirements.txt" \
         -r "${QFW_SRC}/setup/requirements.txt" \
         -r "${QFW_SRC}/setup/qdmi-requirements.txt" \
+        ${pulser_requirements[@]+"${pulser_requirements[@]}"} \
         --override "${QFW_SRC}/setup/overrides.txt" \
         "${qrmi_requirement}"
 

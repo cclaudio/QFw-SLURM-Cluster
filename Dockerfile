@@ -412,7 +412,8 @@ RUN set -ex \
     && test -x "${TNQVM_PREFIX}/bin/circuit_runner.tnqvm" \
     && test -f "${TNQVM_PREFIX}/xacc/plugins/libtnqvm.so"
 
-# Share QFw's QDMI package pins with developer installs.
+# Share QFw's QDMI package pins with developer installs, and resolve the Pulser
+# frontend's requirements with them when the QFw ref has them.
 # DEFw finds libfabric through pkg-config. Without libfabric's .pc file on the
 # search path it still builds, as a TCP-only transport, so the last check makes
 # sure the installed library links libfabric.
@@ -420,11 +421,16 @@ RUN set -ex \
     && uv venv --python python3 "${QFW_IMAGE_VENV}" \
     && uv pip install --python "${QFW_IMAGE_VENV}" --upgrade \
         pip setuptools wheel \
+    && pulser_requirements= \
+    && if [ -f "${QFW_IMAGE_SOURCE}/setup/pulser-requirements.txt" ]; then \
+        pulser_requirements="-r ${QFW_IMAGE_SOURCE}/setup/pulser-requirements.txt"; \
+    fi \
     && uv pip install --python "${QFW_IMAGE_VENV}" \
         -r "${QFW_IMAGE_SOURCE}/setup/build-requirements.txt" \
         -r "${QFW_IMAGE_SOURCE}/setup/requirements.txt" \
         "qrmi==${QRMI_VERSION}" \
         -r "${QFW_IMAGE_SOURCE}/setup/qdmi-requirements.txt" \
+        ${pulser_requirements} \
         --override "${QFW_IMAGE_SOURCE}/setup/overrides.txt" \
     && export PKG_CONFIG_PATH="${LIBFABRIC_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH}" \
     && PATH="${QFW_IMAGE_VENV}/bin:${PATH}" cmake \
