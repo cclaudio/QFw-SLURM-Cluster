@@ -22,6 +22,7 @@ qpus:
     execution-owner: qrmi
     caps:
       run_circuit: [qrmi]
+      get_backend_info: [qrmi]
       get_task_timing: [qrmi]
       get_task_metadata: [qrmi]
   aws:

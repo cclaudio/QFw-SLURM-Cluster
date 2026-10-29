@@ -25,6 +25,7 @@ import gzip
 import json
 import os
 import pathlib
+import shlex
 import subprocess
 import time
 import uuid
@@ -70,6 +71,19 @@ cd "{job_dir}"
 
 source "${{QFW_PREFIX}}/bin/qfw-activate" --venv "${{QFW_VENV}}"
 
+unset DEFW_AGENT_NAME
+unset DEFW_AGENT_TYPE
+unset DEFW_DISABLE_DIRSVC
+unset DEFW_EXTERNAL_EXPERIMENTS_PATH
+unset DEFW_LISTEN_PORT
+unset DEFW_LOG_DIR
+unset DEFW_PARENT_ADDR
+unset DEFW_PARENT_HOSTNAME
+unset DEFW_PARENT_NAME
+unset DEFW_PARENT_PORT
+unset DEFW_SHELL_TYPE
+unset DEFW_TELNET_PORT
+
 qfw_runtime_ready=0
 cleanup() {{
     local rc=$?
@@ -93,7 +107,7 @@ qfw-srun "{sampler}" \\
     --circuit "{circuit_file}" \\
     --shots {shots} \\
     --provider "{provider}" \\
-    --out "{counts_file}"
+    --out "{counts_file}" {sampler_args}
 """
 
 
@@ -120,11 +134,17 @@ def run_sampler_job(circuit, *, shots, qpu, work_dir, provider=None,
                     partition="normal", account="qfw-test", walltime="00:10:00",
                     max_depth=None, qfw_prefix="/opt/openqse/qfw",
                     qfw_venv="/opt/openqse/qfw-venv", sampler=None,
+                    sampler_args=None,
                     poll_interval=5.0, timeout=1800.0, logger=print):
     """Submit the sampling of ``circuit`` as a qfw-slurm job and return the
     sampler's record (counts plus metadata). Raises on failure."""
     provider = provider or qpu
     sampler = pathlib.Path(sampler) if sampler else HERE / "qfw_sampler.py"
+    sampler_args = sampler_args or []
+    sampler_args_text = " ".join(
+        shlex.quote(str(value))
+        for value in sampler_args
+    )
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
     job_dir = pathlib.Path(work_dir).expanduser().resolve() / \
         f"qfw_{stamp}_{uuid.uuid4().hex[:8]}"
@@ -155,6 +175,7 @@ def run_sampler_job(circuit, *, shots, qpu, work_dir, provider=None,
         shots=shots,
         provider=provider,
         counts_file=counts_file,
+        sampler_args=sampler_args_text,
     )
     script_file = job_dir / "qfw_sampler.slurm"
     script_file.write_text(script)
