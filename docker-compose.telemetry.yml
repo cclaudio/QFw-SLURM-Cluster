@@ -48,6 +48,7 @@ x-qfw-telemetry: &qfw-telemetry
     # internals come only with "all", and "error" is the production
     # setting. Whatever a process logs at the chosen level leaves it.
     QFW_TELEMETRY_LOGS: ${QFW_TELEMETRY_LOGS:-debug}
+    QFW_TELEMETRY_VENDOR: ${QFW_TELEMETRY_VENDOR:-1}
     OTEL_METRIC_EXPORT_INTERVAL: ${QFW_TELEMETRY_METRIC_INTERVAL_MS:-5000}
     # Deltas since the last export rather than totals since the process
     # started. A client process that lives for one job then exports exactly
@@ -183,6 +184,8 @@ services:
   aws:
     <<: *qfw-telemetry
   fake-iqm-head:
+    <<: *qfw-telemetry
+  qsa-sim-head:
     <<: *qfw-telemetry
 
 volumes:

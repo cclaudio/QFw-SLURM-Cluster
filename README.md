@@ -221,6 +221,8 @@ Everything about the stack, what reports and how, the dashboards, the
 Prometheus metric names and troubleshooting is in
 [telemetry/README.md](telemetry/README.md). Without the overlay nothing in
 QFw changes.
+For a site without containers, the same stack installs on one host as plain
+processes: [Deploy the telemetry stack on bare metal](docs/recipes/deploy-telemetry-baremetal.md).
 
 ## Build And Run [QFw]
 
@@ -286,7 +288,6 @@ shared-dir/
   benchmarks/   # optional benchmark outputs
   rocm/         # optional ROCm prefix for ROCm/HIP builds
   mqt-core/     # optional active MQT Core checkout
-  mqt-cc-venv/  # optional compiler Python venv created inside the container
 ```
 
 1. Configure the host mount and clone [QFw] and MQT Core:
@@ -755,12 +756,10 @@ If [Slurm] config changes are not visible inside the running containers:
 ./update_slurmfiles.sh slurm.conf gres.conf rest.conf cgroup.conf
 ```
 
-If the mounted developer venvs came from an older image:
+To rebuild the mounted developer venv from scratch:
 
 ```bash
-docker exec slurmctld rm -rf \
-  /workspace/qfw-container-base/qfw-venv \
-  /workspace/qfw-container-base/mqt-cc-venv
+docker exec slurmctld rm -rf /workspace/qfw-container-base/qfw-venv
 ./do_qfw_build.sh
 ```
 

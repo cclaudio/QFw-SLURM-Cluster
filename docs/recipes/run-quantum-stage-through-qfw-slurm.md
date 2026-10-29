@@ -94,9 +94,26 @@ headroom for the QPM's transpilation, and the shot count. The record carries
 the counts, the service and reservation ids, the Slurm job id and the job
 directory.
 
-For the SQD closed loop, this call replaces the in-process `QFwResource`
-sampling in the walker. The counts convert to a `BitArray` the same way the
-workflow already does for its other sources.
+For workflows that need a custom application-side sampler, pass its path with
+`sampler` and any additional command-line arguments with `sampler_args`.
+The submitter safely quotes these arguments before rendering the Slurm job.
+
+For example:
+
+```python
+record = run_sampler_job(
+    circuit,
+    shots=shots,
+    qpu="ibm-156-nh",
+    work_dir="/workspace/home/user-a/qfw_jobs",
+    sampler="/path/to/custom_sampler.py",
+    sampler_args=["--option", "value"],
+)
+```
+
+For the SQD closed loop, the walker uses this call to submit its quantum sampling
+stage through QFw-SLURM. The returned counts are converted to a BitArray before
+the workflow continues with recovery and SBD.
 
 ## What the Job Carries
 
@@ -104,6 +121,6 @@ The rendered script holds, in this order: the Slurm directives for the
 partition, account, one node, one task, walltime and output files; the six
 qfw-slurm options; QFw activation with the image's prefix and venv; a
 `QFW_RUN_BASE_DIR` inside the job directory; `qfw-setup`; the sampler under
-`qfw-srun`; and `qfw-teardown` on exit. Nothing in it is specific to the
-sampler, so the same shape serves any QFw application a workflow wants to
-launch under a reservation.
+`qfw-srun`; and `qfw-teardown` on exit. The job structure is not specific to
+a particular sampler, so the same shape serves any QFw application a workflow
+wants to launch under a reservation.

@@ -27,6 +27,12 @@ grep -q '^iqm-head: qfw-qpm-svc start ' "${temporary}/start.out"
 grep -q '^shim-head: qfw-qpm-svc start ' "${temporary}/start.out"
 grep -q '^ibm-156-nh: qfw-qpm-svc start ' "${temporary}/start.out"
 grep -q '^aws: qfw-qpm-svc start ' "${temporary}/start.out"
+# qsa-sim is opt-in (service start, not container), so the aggregate start
+# must not touch it.
+if grep -q 'qsa-sim-head' "${temporary}/start.out"; then
+	echo "start (target all) must not touch qsa-sim-head" >&2
+	exit 1
+fi
 grep -q '^fake-iqm-head: qfw-qpm-svc start ' "${temporary}/start.out"
 grep -q '^slurmctld: qfw gateway start$' "${temporary}/start.out"
 grep -q 'nwqsim-head,nwqsim-worker-1,nwqsim-worker-2' \
@@ -47,6 +53,10 @@ grep -q '^iqm-head: qfw-qpm-svc status ' "${temporary}/status.out"
 grep -q '^shim-head: qfw-qpm-svc status ' "${temporary}/status.out"
 grep -q '^ibm-156-nh: qfw-qpm-svc status ' "${temporary}/status.out"
 grep -q '^aws: qfw-qpm-svc status ' "${temporary}/status.out"
+if grep -q 'qsa-sim-head' "${temporary}/status.out"; then
+	echo "status (target all) must not touch qsa-sim-head" >&2
+	exit 1
+fi
 grep -q '^fake-iqm-head: qfw-qpm-svc status ' "${temporary}/status.out"
 grep -q '^slurmctld: qfw gateway status$' "${temporary}/status.out"
 
@@ -61,6 +71,7 @@ grep -q '^slurmctld: qfw gateway status$' "${temporary}/status.out"
 	shim_ready() { echo '{"state":"stale"}'; return 1; }
 	ibm_ready() { echo '{"state":"stale"}'; return 1; }
 	aws_ready() { echo '{"state":"stale"}'; return 1; }
+	qsa_sim_ready() { echo 'unreachable node' >&2; return 99; }
 	fake_iqm_ready() { echo '{"state":"stale"}'; return 1; }
 	gateway_managed_ready() { echo 'not-ready'; return 1; }
 	service_status
@@ -108,6 +119,7 @@ cmp "${temporary}/health-summary.expected" "${temporary}/health-summary.out"
 		echo 'qfw-qpm-svc: service-plane state not found: /var/lib/qfw-site-services/qpm/shim-aws-qpm/state/service-plane.json'
 		return 1
 	}
+	qsa_sim_ready() { echo 'unreachable node' >&2; return 99; }
 	fake_iqm_ready() {
 		echo 'qfw-qpm-svc: service-plane state not found: /var/lib/qfw-site-services/qpm/fake-iqm/state/service-plane.json'
 		return 1
@@ -141,6 +153,7 @@ PY
 	shim_ready() { echo '{"state":"ready"}'; }
 	ibm_ready() { echo '{"state":"ready"}'; }
 	aws_ready() { echo '{"state":"ready"}'; }
+	qsa_sim_ready() { echo 'unreachable node' >&2; return 99; }
 	fake_iqm_ready() { echo '{"state":"ready"}'; }
 	gateway_managed_ready() { echo 'ready'; }
 	service_status
@@ -154,12 +167,30 @@ with open(sys.argv[1], encoding="utf-8") as stream:
 assert status["schema"] == "qfw-site-services-status-v1"
 assert status["state"] == "up"
 assert set(status["services"]) == {
-    "directory", "nwqsim", "iqm", "shim", "ibm", "aws", "fake-iqm",
-    "gateway"
+    "directory", "nwqsim", "iqm", "shim", "ibm", "aws", "fake-iqm", "gateway"
 }
 PY
 
-for target in directory nwqsim iqm shim ibm aws fake-iqm gateway; do
+# An explicit qsa-sim target still reports it.
+(
+	source "${command}"
+	dry_run=false
+	target=qsa-sim
+	json_status=true
+	qsa_sim_ready() { echo '{"state":"ready"}'; }
+	service_status
+) >"${temporary}/qsa-sim-health.json"
+python3 - "${temporary}/qsa-sim-health.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as stream:
+    status = json.load(stream)
+assert status["state"] == "up"
+assert set(status["services"]) == {"qsa-sim"}
+PY
+
+for target in directory nwqsim iqm shim ibm aws qsa-sim fake-iqm gateway; do
 	"${command}" --dry-run start --target "${target}" \
 		>"${temporary}/start-${target}.out"
 	"${command}" --dry-run status --target "${target}" \
@@ -181,6 +212,8 @@ grep -q '^ibm-156-nh: qfw-qpm-svc start ' \
 	"${temporary}/start-ibm.out"
 grep -q '^aws: qfw-qpm-svc start ' \
 	"${temporary}/start-aws.out"
+grep -q '^qsa-sim-head: qfw-qpm-svc start ' \
+	"${temporary}/start-qsa-sim.out"
 grep -q '^fake-iqm-head: qfw-qpm-svc start ' \
 	"${temporary}/start-fake-iqm.out"
 grep -q '^slurmctld: qfw gateway start$' \
@@ -190,9 +223,54 @@ if "${command}" --dry-run status --target missing >/dev/null 2>&1; then
 	exit 1
 fi
 
+# stop_services touches qsa-sim only when it is running: a live one is stopped
+# in order, an absent one is never contacted.
+(
+	source "${command}"
+	dry_run=false
+	qsa_sim_up=true
+	qsa_sim_ready() { ${qsa_sim_up}; }
+	backline_ready() { return 1; }
+	stop_gateway() { echo stop-gateway; }
+	stop_fake_iqm() { echo stop-fake-iqm; }
+	stop_qsa_sim() { echo stop-qsa-sim; }
+	stop_aws() { echo stop-aws; }
+	stop_ibm() { echo stop-ibm; }
+	stop_shim() { echo stop-shim; }
+	stop_iqm() { echo stop-iqm; }
+	stop_nwqsim() { echo stop-nwqsim; }
+	stop_directory() { echo stop-directory; }
+	stop_services
+	qsa_sim_up=false
+	echo ---
+	stop_services
+) >"${temporary}/stop-qsa-sim.out"
+cat >"${temporary}/stop-qsa-sim.expected" <<'EOF'
+stop-gateway
+stop-fake-iqm
+stop-qsa-sim
+stop-aws
+stop-ibm
+stop-shim
+stop-iqm
+stop-nwqsim
+stop-directory
+---
+stop-gateway
+stop-fake-iqm
+stop-aws
+stop-ibm
+stop-shim
+stop-iqm
+stop-nwqsim
+stop-directory
+EOF
+cmp "${temporary}/stop-qsa-sim.expected" "${temporary}/stop-qsa-sim.out"
+
 "${command}" --dry-run stop >"${temporary}/stop.out"
 gateway_line="$(grep -n 'qfw gateway stop$' "${temporary}/stop.out" | cut -d: -f1)"
 fake_iqm_line="$(grep -n '^fake-iqm-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
+qsa_sim_line="$(grep -n '^qsa-sim-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
 aws_line="$(grep -n '^aws: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
 ibm_line="$(grep -n '^ibm-156-nh: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
 shim_line="$(grep -n '^shim-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
@@ -200,7 +278,8 @@ iqm_line="$(grep -n '^iqm-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut
 nwqsim_line="$(grep -n '^nwqsim-head: qfw-qpm-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
 directory_line="$(grep -n '^slurmctld: qfw-dir-svc stop ' "${temporary}/stop.out" | cut -d: -f1)"
 [[ "${gateway_line}" -lt "${fake_iqm_line}" ]]
-[[ "${fake_iqm_line}" -lt "${aws_line}" ]]
+[[ "${fake_iqm_line}" -lt "${qsa_sim_line}" ]]
+[[ "${qsa_sim_line}" -lt "${aws_line}" ]]
 [[ "${aws_line}" -lt "${ibm_line}" ]]
 [[ "${ibm_line}" -lt "${shim_line}" ]]
 [[ "${shim_line}" -lt "${iqm_line}" ]]
@@ -216,6 +295,7 @@ directory_line="$(grep -n '^slurmctld: qfw-dir-svc stop ' "${temporary}/stop.out
 	shim_ready() { return 0; }
 	ibm_ready() { return 0; }
 	aws_ready() { return 0; }
+	qsa_sim_ready() { return 0; }
 	fake_iqm_ready() { return 0; }
 	gateway_managed_ready() { return 0; }
 	run_qfw() { return 99; }
@@ -228,6 +308,10 @@ grep -q 'IQM QPM is already ready' "${temporary}/already-ready.out"
 grep -q 'Shim QPM is already ready' "${temporary}/already-ready.out"
 grep -q 'IBM Shim QPM is already ready' "${temporary}/already-ready.out"
 grep -q 'AWS is already ready' "${temporary}/already-ready.out"
+if grep -q 'QSA Sim' "${temporary}/already-ready.out"; then
+	echo "start (target all) must not start qsa-sim" >&2
+	exit 1
+fi
 grep -q 'Fake IQM QPM is already ready' "${temporary}/already-ready.out"
 grep -q 'QFw Slurm gateway is already ready' "${temporary}/already-ready.out"
 
@@ -242,6 +326,7 @@ grep -q 'QFw Slurm gateway is already ready' "${temporary}/already-ready.out"
 	shim_ready() { return 1; }
 	ibm_ready() { return 1; }
 	aws_ready() { return 1; }
+	qsa_sim_ready() { return 1; }
 	fake_iqm_ready() { return 1; }
 	gateway_managed_ready() { return 1; }
 	require_directory() { return 0; }
@@ -252,6 +337,7 @@ grep -q 'QFw Slurm gateway is already ready' "${temporary}/already-ready.out"
 	stop_shim() { echo stop-shim >>"${temporary}/non-ready.calls"; }
 	stop_ibm() { echo stop-ibm >>"${temporary}/non-ready.calls"; }
 	stop_aws() { echo stop-aws >>"${temporary}/non-ready.calls"; }
+	stop_qsa_sim() { echo stop-qsa-sim >>"${temporary}/non-ready.calls"; }
 	stop_fake_iqm() { echo stop-fake-iqm >>"${temporary}/non-ready.calls"; }
 	stop_gateway() { echo stop-gateway >>"${temporary}/non-ready.calls"; }
 	run_qfw() { echo "run-qfw:$1:$2" >>"${temporary}/non-ready.calls"; }
@@ -262,6 +348,7 @@ grep -q 'QFw Slurm gateway is already ready' "${temporary}/already-ready.out"
 	start_shim
 	start_ibm
 	start_aws
+	start_qsa_sim
 	start_fake_iqm
 	start_gateway
 ) >"${temporary}/non-ready.events"
@@ -283,13 +370,16 @@ grep -q '^stop-ibm$' "${temporary}/non-ready.calls"
 grep -q 'AWS is not ready; cleaning retained state' \
 	"${temporary}/non-ready.events"
 grep -q '^stop-aws$' "${temporary}/non-ready.calls"
+grep -q 'QSA Sim QPM is not ready; cleaning retained state' \
+	"${temporary}/non-ready.events"
+grep -q '^stop-qsa-sim$' "${temporary}/non-ready.calls"
 grep -q 'Fake IQM QPM is not ready; cleaning retained state' \
 	"${temporary}/non-ready.events"
 grep -q '^stop-fake-iqm$' "${temporary}/non-ready.calls"
 grep -q 'QFw Slurm gateway is not ready; cleaning retained state' \
 	"${temporary}/non-ready.events"
 grep -q '^stop-gateway$' "${temporary}/non-ready.calls"
-[[ "$(grep -c '^run-qfw:' "${temporary}/non-ready.calls")" -eq 7 ]]
+[[ "$(grep -c '^run-qfw:' "${temporary}/non-ready.calls")" -eq 8 ]]
 grep -q '^run-gateway:start$' "${temporary}/non-ready.calls"
 
 (
@@ -301,6 +391,7 @@ grep -q '^run-gateway:start$' "${temporary}/non-ready.calls"
 	shim_up=true
 	ibm_up=true
 	aws_up=true
+	qsa_sim_up=true
 	fake_iqm_up=true
 	gateway_up=true
 	directory_ready() { ${directory_up}; }
@@ -309,10 +400,12 @@ grep -q '^run-gateway:start$' "${temporary}/non-ready.calls"
 	shim_ready() { ${shim_up}; }
 	ibm_ready() { ${ibm_up}; }
 	aws_ready() { ${aws_up}; }
+	qsa_sim_ready() { ${qsa_sim_up}; }
 	fake_iqm_ready() { ${fake_iqm_up}; }
 	gateway_managed_ready() { ${gateway_up}; }
 	stop_gateway() { echo stop-gateway; gateway_up=false; }
 	stop_fake_iqm() { echo stop-fake-iqm; fake_iqm_up=false; }
+	stop_qsa_sim() { echo stop-qsa-sim; qsa_sim_up=false; }
 	stop_aws() { echo stop-aws; aws_up=false; }
 	stop_ibm() { echo stop-ibm; ibm_up=false; }
 	stop_shim() { echo stop-shim; shim_up=false; }
@@ -324,6 +417,7 @@ grep -q '^run-gateway:start$' "${temporary}/non-ready.calls"
 	start_shim() { echo start-shim; shim_up=true; }
 	start_ibm() { echo start-ibm; ibm_up=true; }
 	start_aws() { echo start-aws; aws_up=true; }
+	start_qsa_sim() { echo start-qsa-sim; qsa_sim_up=true; }
 	start_fake_iqm() { echo start-fake-iqm; fake_iqm_up=true; }
 	start_gateway() { echo start-gateway; gateway_up=true; }
 	stop_directory() { echo stop-directory; directory_up=false; }
@@ -334,6 +428,7 @@ sed '/QFw site services are ready/d' "${temporary}/partial-state.out" \
 cat >"${temporary}/partial-state.expected" <<'EOF'
 stop-gateway
 stop-fake-iqm
+stop-qsa-sim
 stop-aws
 stop-ibm
 stop-shim
@@ -360,12 +455,14 @@ cmp "${temporary}/partial-state.expected" "${temporary}/partial-state.events"
 	shim_up=false
 	ibm_up=false
 	aws_up=false
+	qsa_sim_up=false
 	directory_ready() { ${directory_up}; }
 	nwqsim_ready() { ${nwqsim_up}; }
 	iqm_ready() { ${iqm_up}; }
 	shim_ready() { ${shim_up}; }
 	ibm_ready() { ${ibm_up}; }
 	aws_ready() { ${aws_up}; }
+	qsa_sim_ready() { ${qsa_sim_up}; }
 	fake_iqm_ready() { return 1; }
 	gateway_managed_ready() { return 1; }
 	start_directory() { return 0; }
@@ -389,6 +486,10 @@ cmp "${temporary}/partial-state.expected" "${temporary}/partial-state.events"
 		echo start-aws >>"${temporary}/rollback.events"
 		aws_up=true
 	}
+	start_qsa_sim() {
+		echo start-qsa-sim >>"${temporary}/rollback.events"
+		qsa_sim_up=true
+	}
 	start_fake_iqm() {
 		echo fail-fake-iqm >>"${temporary}/rollback.events"
 		return 1
@@ -400,6 +501,10 @@ cmp "${temporary}/partial-state.expected" "${temporary}/partial-state.events"
 	stop_ibm() {
 		echo stop-ibm >>"${temporary}/rollback.events"
 		ibm_up=false
+	}
+	stop_qsa_sim() {
+		echo stop-qsa-sim >>"${temporary}/rollback.events"
+		qsa_sim_up=false
 	}
 	stop_aws() {
 		echo stop-aws >>"${temporary}/rollback.events"
@@ -425,6 +530,10 @@ grep -q '^start-shim$' "${temporary}/rollback.events"
 grep -q '^start-ibm$' "${temporary}/rollback.events"
 grep -q '^start-aws$' "${temporary}/rollback.events"
 grep -q '^fail-fake-iqm$' "${temporary}/rollback.events"
+if grep -q 'qsa-sim' "${temporary}/rollback.events"; then
+	echo "aggregate start and rollback must not touch qsa-sim" >&2
+	exit 1
+fi
 grep -q '^stop-aws$' "${temporary}/rollback.events"
 grep -q '^stop-ibm$' "${temporary}/rollback.events"
 grep -q '^stop-shim$' "${temporary}/rollback.events"
